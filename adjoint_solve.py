@@ -98,6 +98,88 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma):
 
     return dict(t=fwd['t'], p=p, r=r, lam=lam)
 
+def adjoint_solve_feat(fwd, events_obs, M, w_T=1.0, w_du=1.0, V_thresh=1e-6):
+    """
+    Adjoint solver for the feature-based objective J_feat.
+
+      J_feat = w_du * Σ_i (Δu_i_mod - Δu_i_obs)²
+             + w_T  * Σ_i (T_i_mod  - T_i_obs )²
+
+    Uses the same 3-stage embedded RK as adjoint_solve, but replaces the
+    Gaussian-smoothed waveform misfit with feature-based adjoint forcing
+    sm(t) = dJ_feat/du(t) built by build_feat_adjoint_forcing.
+
+    The gradient formula compute_grad_a is identical to the waveform case and
+    works unchanged with the adjoint variables returned here.
+
+    Parameters
+    ----------
+    fwd        : forward solution dict (from forward_solve_adaptive).
+    events_obs : list of observed event dicts (from detect_events on the true fwd).
+    M          : model-parameter dict.
+    w_T, w_du  : weights for the T and Δu terms in J_feat.
+    V_thresh   : velocity threshold for event detection (m/s).
+
+    Returns
+    -------
+    adj : dict with keys t, p, r, lam  (same structure as adjoint_solve).
+    """
+    k   = M['k']
+    eta = M['eta']
+    n   = len(fwd['t'])
+
+    # Detect events in current forward solution and build feature-based forcing
+    events_mod = detect_events(fwd, V_thresh)
+    sm_feat    = build_feat_adjoint_forcing(fwd, events_mod, events_obs, M, w_T, w_du)
+
+    # --- reverse arrays so index 0 = t=T, index n-1 = t=0 ---
+    rev  = slice(None, None, -1)
+    tV_r = fwd['tau_V'][rev]
+    tP_r = fwd['tau_psi'][rev]
+    GV_r = fwd['G_V'][rev]
+    GP_r = fwd['G_psi'][rev]
+    sm_r = sm_feat[rev]
+    t_r  = fwd['t'][rev]
+
+    p_r = np.zeros(n)
+    r_r = np.zeros(n)
+
+    def _rhs(p, r, tV, tP, GV, GP, sm):
+        D   = tV + eta
+        lam = (p + GV * r) / D
+        return -k * lam - sm, -tP * lam + GP * r
+
+    for j in range(n - 1):
+        dt_tau = t_r[j] - t_r[j + 1]
+
+        pj, rj = p_r[j], r_r[j]
+
+        tV1, tP1, GV1, GP1, sm1 = tV_r[j],     tP_r[j],     GV_r[j],     GP_r[j],     sm_r[j]
+        tV2, tP2, GV2, GP2, sm2 = (0.5*(tV_r[j]+tV_r[j+1]), 0.5*(tP_r[j]+tP_r[j+1]),
+                                    0.5*(GV_r[j]+GV_r[j+1]), 0.5*(GP_r[j]+GP_r[j+1]),
+                                    0.5*(sm_r[j]+sm_r[j+1]))
+        tV3, tP3, GV3, GP3, sm3 = tV_r[j+1],   tP_r[j+1],   GV_r[j+1],   GP_r[j+1],   sm_r[j+1]
+
+        dp1, dr1 = _rhs(pj, rj, tV1, tP1, GV1, GP1, sm1)
+
+        p2 = pj + 0.5 * dt_tau * dp1
+        r2 = rj + 0.5 * dt_tau * dr1
+        dp2, dr2 = _rhs(p2, r2, tV2, tP2, GV2, GP2, sm2)
+
+        p3 = pj + dt_tau * (-dp1 + 2.0 * dp2)
+        r3 = rj + dt_tau * (-dr1 + 2.0 * dr2)
+        dp3, dr3 = _rhs(p3, r3, tV3, tP3, GV3, GP3, sm3)
+
+        p_r[j + 1] = pj + dt_tau / 6.0 * (dp1 + 4.0 * dp2 + dp3)
+        r_r[j + 1] = rj + dt_tau / 6.0 * (dr1 + 4.0 * dr2 + dr3)
+
+    p   = p_r[rev]
+    r   = r_r[rev]
+    lam = (p + fwd['G_V'] * r) / (fwd['tau_V'] + eta)
+
+    return dict(t=fwd['t'], p=p, r=r, lam=lam)
+
+
 def make_smoothing_matrix(t, sigma):
     """
     Row-normalised Gaussian smoothing matrix on an arbitrary time grid.
