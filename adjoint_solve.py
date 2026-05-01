@@ -3,7 +3,7 @@ from friction_derivs import *
 from compute_obj import *
 import numpy as np
 
-def adjoint_solve(fwd, t_obs, u_obs, M, sigma):
+def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None):
     """
     Adjoint solver integrated **forwards in reversed time** τ = T - t using
     the same 3-stage embedded RK scheme as the forward solver.
@@ -29,23 +29,44 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma):
     Smoothed misfit source: sm = S^T(Su − Su_obs),  S = Gaussian(t, σ).
     IC: p=r=0 at τ=0 (t=T).
     At the end, arrays are flipped back to original time order.
+
+    Optional fwd_interp: if provided, τ_V, τ_ψ, G_V, G_ψ, and u are
+    linearly interpolated from fwd_interp onto fwd['t'].  The time stepping
+    still uses the grid in fwd['t'].  This lets you advance the adjoint on
+    (e.g.) an adaptive time grid while drawing Jacobians from a different
+    forward solve (e.g. a Forward-Euler solution).
     """
     k   = M['k']
     eta = M['eta']
     n   = len(fwd['t'])
 
+    # --- choose source arrays for forward-state quantities ---
+    if fwd_interp is not None:
+        t_src       = fwd_interp['t']
+        u_src       = np.interp(fwd['t'], t_src, fwd_interp['u'])
+        tau_V_src   = np.interp(fwd['t'], t_src, fwd_interp['tau_V'])
+        tau_psi_src = np.interp(fwd['t'], t_src, fwd_interp['tau_psi'])
+        G_V_src     = np.interp(fwd['t'], t_src, fwd_interp['G_V'])
+        G_psi_src   = np.interp(fwd['t'], t_src, fwd_interp['G_psi'])
+    else:
+        u_src       = fwd['u']
+        tau_V_src   = fwd['tau_V']
+        tau_psi_src = fwd['tau_psi']
+        G_V_src     = fwd['G_V']
+        G_psi_src   = fwd['G_psi']
+
     # --- smoothed misfit: S^T (S u − S u_obs) ---
     S             = make_smoothing_matrix(fwd['t'], sigma)
     print(np.shape(fwd['t']), np.shape(t_obs), np.shape(u_obs))
     u_obs_at_fwd  = np.interp(fwd['t'], t_obs, u_obs)
-    smooth_misfit = S.T @ (S @ fwd['u'] - S @ u_obs_at_fwd)   # shape (n,)
+    smooth_misfit = S.T @ (S @ u_src - S @ u_obs_at_fwd)   # shape (n,)
 
     # --- reverse arrays so index 0 = t=T, index n-1 = t=0 ---
     rev  = slice(None, None, -1)
-    tV_r = fwd['tau_V'][rev]
-    tP_r = fwd['tau_psi'][rev]
-    GV_r = fwd['G_V'][rev]
-    GP_r = fwd['G_psi'][rev]
+    tV_r = tau_V_src[rev]
+    tP_r = tau_psi_src[rev]
+    GV_r = G_V_src[rev]
+    GP_r = G_psi_src[rev]
     sm_r = smooth_misfit[rev]
     t_r  = fwd['t'][rev]
 
@@ -98,6 +119,6 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma):
     r   = r_r[rev]
 
     # λ = Lagrange multiplier of the force-balance constraint
-    lam = (p + fwd['G_V'] * r) / (fwd['tau_V'] + eta)
+    lam = (p + G_V_src * r) / (tau_V_src + eta)
 
     return dict(t=fwd['t'], p=p, r=r, lam=lam)
