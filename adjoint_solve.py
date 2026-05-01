@@ -36,6 +36,7 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma):
 
     # --- smoothed misfit: S^T (S u − S u_obs) ---
     S             = make_smoothing_matrix(fwd['t'], sigma)
+    print(np.shape(fwd['t']), np.shape(t_obs), np.shape(u_obs))
     u_obs_at_fwd  = np.interp(fwd['t'], t_obs, u_obs)
     smooth_misfit = S.T @ (S @ fwd['u'] - S @ u_obs_at_fwd)   # shape (n,)
 
@@ -50,6 +51,9 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma):
 
     p_r = np.zeros(n)   # IC at τ=0 (t=T)
     r_r = np.zeros(n)
+
+    u_r   = fwd['u'][::-1]
+    psi_r = fwd['psi'][::-1]
 
     def _rhs(p, r, tV, tP, GV, GP, sm):
         """Adjoint RHS at a single point with given forward-state coefficients."""
@@ -97,17 +101,3 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma):
     lam = (p + fwd['G_V'] * r) / (fwd['tau_V'] + eta)
 
     return dict(t=fwd['t'], p=p, r=r, lam=lam)
-
-def make_smoothing_matrix(t, sigma):
-    """
-    Row-normalised Gaussian smoothing matrix on an arbitrary time grid.
-
-    S[i, j] = exp(-(t[i] - t[j])^2 / (2*sigma^2))  then row-normalised.
-
-    Forms a dense (n x n) array — keep sigma modest relative to n*dt_max
-    if memory is a concern.
-    """
-    diff2 = (t[:, None] - t[None, :]) ** 2 / (2.0 * sigma ** 2)
-    S = np.exp(-diff2)
-    S /= S.sum(axis=1, keepdims=True)
-    return S

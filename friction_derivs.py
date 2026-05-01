@@ -88,3 +88,17 @@ def solve_V_algebraic(u, psi, M, tau_L):
     Vmin = 1e-30
     Vmax = rhs / M['eta']
     return brentq(res, Vmin, Vmax, xtol=1e-20, rtol=1e-10)
+
+def make_smoothing_matrix(t, sigma):
+    """
+    Row-normalised Gaussian smoothing matrix on an arbitrary time grid.
+
+    S[i, j] = exp(-(t[i] - t[j])^2 / (2*sigma^2))  then row-normalised.
+
+    Forms a dense (n x n) array — keep sigma modest relative to n*dt_max
+    if memory is a concern.
+    """
+    diff2 = (t[:, None] - t[None, :]) ** 2 / (2.0 * sigma ** 2)
+    S = np.exp(-diff2)
+    S /= S.sum(axis=1, keepdims=True)
+    return S
