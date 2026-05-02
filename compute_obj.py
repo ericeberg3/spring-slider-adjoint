@@ -1,5 +1,6 @@
 from adjoint_solve import *
 from adapt_fwd_solve import *
+from friction_derivs import *
 
 def compute_J(fwd, t_obs, u_obs, sigma):
     """J = 0.5 * int_0^T (Su - Su_obs)^2 dt  (trapezoidal, Gaussian-smoothed misfit)."""

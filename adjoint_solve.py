@@ -56,10 +56,13 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None):
         G_psi_src   = fwd['G_psi']
 
     # --- smoothed misfit: S^T (S u − S u_obs) ---
-    S             = make_smoothing_matrix(fwd['t'], sigma)
-    print(np.shape(fwd['t']), np.shape(t_obs), np.shape(u_obs))
-    u_obs_at_fwd  = np.interp(fwd['t'], t_obs, u_obs)
-    smooth_misfit = S.T @ (S @ u_src - S @ u_obs_at_fwd)   # shape (n,)
+    u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs)
+    if sigma is None:
+        # S = I  →  S^T(Su − Su_obs) = u − u_obs  (no matrix needed)
+        smooth_misfit = u_src - u_obs_at_fwd
+    else:
+        S             = make_smoothing_matrix(fwd['t'], sigma)
+        smooth_misfit = S.T @ (S @ u_src - S @ u_obs_at_fwd)   # shape (n,)
 
     # --- reverse arrays so index 0 = t=T, index n-1 = t=0 ---
     rev  = slice(None, None, -1)
