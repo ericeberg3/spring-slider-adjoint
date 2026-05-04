@@ -2,7 +2,22 @@ import numpy as np
 from friction_derivs import *
 from adjoint_solve import *
 
-def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
+def compute_steady_ic(M, V_init):
+    """
+    Return (psi0, M_mod) for a given parameter dict and target initial velocity.
+
+    psi0   = steady-state state variable at V_bg for the current 'a'
+    M_mod  = copy of M with tau0 recomputed so that V(0) = V_init exactly,
+             placing the system in a regime analogous to the reference case.
+    Does not mutate the input dict.
+    """
+    M_mod = dict(M)
+    fss_bg = fss_fn(M['V_bg'], M)
+    psi0 = M['a'] * np.log(2.0 * M['V0'] / M['V_bg'] * np.sinh(fss_bg / M['a']))
+    M_mod['tau0'] = tau_fn(V_init, psi0, M_mod) + M_mod['eta'] * V_init
+    return psi0, M_mod
+
+def forward_solve_adaptive(M, T, u0, psi0, V_init=None, steady_ic=False,
                            tol=1e-8, dt0=1.0, dtmax=1e5, safety=0.8):
     """
     Adaptive-step forward solve using a 3-stage embedded RK method
@@ -11,7 +26,18 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
     Loading: tau_L(t) = tau0 + k*V_bg*t
     ODE:     du/dt = V,   dpsi/dt = G(V,psi)
     Algebraic: tau(V,psi) + eta*V + k*u = tau_L(t)  =>  V
+
+    steady_ic : bool
+        If True, override psi0 and tau0 so the system starts at steady-sliding
+        for the current 'a': psi0 = psi_ss(a), tau0 from force balance at V_init.
+        V_init must be provided when steady_ic=True.
     """
+    if steady_ic:
+        if V_init is None:
+            raise ValueError("steady_ic=True requires V_init to be provided")
+        psi0, M = compute_steady_ic(M, V_init)
+        u0 = 0.0
+
     tau_L_fn = lambda t: M['tau0'] + M['k'] * M['V_bg'] * t
 
     V0 = solve_V_algebraic(u0, psi0, M, tau_L_fn(0.0))
