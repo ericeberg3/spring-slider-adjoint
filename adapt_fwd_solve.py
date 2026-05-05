@@ -3,7 +3,7 @@ from friction_derivs import *
 from adjoint_solve import *
 
 def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
-                           tol=1e-8, dt0=1.0, dtmax=1e5, safety=0.8):
+                           tol=1e-10, dt0=1.0, dtmax=1e5, safety=0.8):
     """
     Adaptive-step forward solve using a 3-stage embedded RK method
     (2nd/3rd-order error-control pair, matching the MATLAB reference).
