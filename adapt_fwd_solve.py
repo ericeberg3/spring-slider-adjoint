@@ -3,7 +3,8 @@ from friction_derivs import *
 from adjoint_solve import *
 
 def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
-                           tol=1e-10, dt0=1.0, dtmax=1e5, safety=0.8):
+                           tol=1e-10, dt0=1.0, dtmax=1e5, safety=0.8,
+                           freeze=None):
     """
     Adaptive-step forward solve using a 3-stage embedded RK method
     (2nd/3rd-order error-control pair, matching the MATLAB reference).
@@ -11,7 +12,13 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
     Loading: tau_L(t) = tau0 + k*V_bg*t
     ODE:     du/dt = V,   dpsi/dt = G(V,psi)
     Algebraic: tau(V,psi) + eta*V + k*u = tau_L(t)  =>  V
+
+    freeze : iterable of str, optional
+        Variables whose time derivatives are forced to zero.
+        Supported values: 'u' (sets du/dt=0), 'psi' (sets dpsi/dt=0).
+        Example: freeze={'psi'} disables state evolution.
     """
+    freeze = set(freeze) if freeze is not None else set()
     tau_L_fn = lambda t: M['tau0'] + M['k'] * M['V_bg'] * t
 
     V0 = solve_V_algebraic(u0, psi0, M, tau_L_fn(0.0))
@@ -23,7 +30,9 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
 
     def _rhs(u_v, psi_v, t_v):
         V = solve_V_algebraic(u_v, psi_v, M, tau_L_fn(t_v))
-        return V, G_fn(V, psi_v, M)
+        du  = 0.0 if 'u'   in freeze else V
+        dps = 0.0 if 'psi' in freeze else G_fn(V, psi_v, M)
+        return du, dps
 
     def _jac(V, psi):
         return (tau_V_fn(V,psi,M), tau_psi_fn(V,psi,M),
@@ -38,7 +47,7 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
     GP_arr=[j[3]]; da_arr=[j[4]]; dGa_arr=[j[5]]
 
     t = 0.0; u = u0; psi = psi0; dt = dt0
-    V1, G1 = V0, G_fn(V0, psi0, M)   # stage-1 values at t=0
+    V1, G1 = _rhs(u0, psi0, 0.0)   # stage-1 values at t=0
 
     while t < T:
         if t + dt > T:
@@ -66,7 +75,7 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
             tV_arr.append(j[0]); tP_arr.append(j[1]); GV_arr.append(j[2])
             GP_arr.append(j[3]); da_arr.append(j[4]); dGa_arr.append(j[5])
 
-            V1 = V_new;  G1 = G_fn(V_new, psi, M)  # stage-1 for next step
+            V1, G1 = _rhs(u, psi, t)  # stage-1 for next step
 
         # Step-size control  (q=2 → exponent 1/3)
         dt = safety * dt * (tol / er)**(1.0/3.0) if er > 0.0 else dtmax
