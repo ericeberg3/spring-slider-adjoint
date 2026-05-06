@@ -98,6 +98,10 @@ def make_smoothing_matrix(t, sigma):
     Forms a dense (n x n) array — keep sigma modest relative to n*dt_max
     if memory is a concern.
     """
+    if sigma == 0:
+        S = np.identity(len(t))
+        return S
+
     diff2 = (t[:, None] - t[None, :]) ** 2 / (2.0 * sigma ** 2)
     S = np.exp(-diff2)
     S /= S.sum(axis=1, keepdims=True)
