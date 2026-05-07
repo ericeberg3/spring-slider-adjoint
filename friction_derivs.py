@@ -91,18 +91,28 @@ def solve_V_algebraic(u, psi, M, tau_L):
 
 def make_smoothing_matrix(t, sigma):
     """
-    Row-normalised Gaussian smoothing matrix on an arbitrary time grid.
+    Row-normalised Gaussian smoothing matrix for a non-uniform time grid.
 
-    S[i, j] = exp(-(t[i] - t[j])^2 / (2*sigma^2))  then row-normalised.
+    Each column j is weighted by the trapezoidal integration weight w[j] so
+    that each row computes a proper time-domain Gaussian average regardless of
+    step-size variation.  This makes the kernel consistent with a fixed
+    time-window Gaussian for adaptive (non-uniform) time grids.
 
-    Forms a dense (n x n) array — keep sigma modest relative to n*dt_max
-    if memory is a concern.
+        S[i,j] ∝ exp(-(t[i]-t[j])^2 / (2*sigma^2)) * w[j],  then row-normalised.
+
+    For a uniform grid the weights are all equal and cancel, recovering the
+    standard un-weighted Gaussian to within negligible endpoint corrections.
     """
     if sigma == 0:
-        S = np.identity(len(t))
-        return S
+        return np.identity(len(t))
+
+    dt = np.diff(t)
+    w = np.empty(len(t))
+    w[0]    = dt[0] / 2.0
+    w[1:-1] = (dt[:-1] + dt[1:]) / 2.0
+    w[-1]   = dt[-1] / 2.0
 
     diff2 = (t[:, None] - t[None, :]) ** 2 / (2.0 * sigma ** 2)
-    S = np.exp(-diff2)
+    S = np.exp(-diff2) * w[None, :]   # weight columns by node spacing
     S /= S.sum(axis=1, keepdims=True)
     return S

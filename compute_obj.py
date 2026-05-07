@@ -2,9 +2,14 @@ from adjoint_solve import *
 from adapt_fwd_solve import *
 from friction_derivs import *
 
-def compute_J(fwd, t_obs, u_obs, sigma):
-    """J = 0.5 * int_0^T (Su - Su_obs)^2 dt  (trapezoidal, Gaussian-smoothed misfit)."""
-    S            = make_smoothing_matrix(fwd['t'], sigma)
+def compute_J(fwd, t_obs, u_obs, sigma, S=None):
+    """J = 0.5 * int_0^T (Su - Su_obs)^2 dt  (trapezoidal, Gaussian-smoothed misfit).
+
+    If S is provided it is used directly; otherwise one is built from sigma via
+    make_smoothing_matrix (integration-weight Gaussian for non-uniform grids).
+    """
+    if S is None:
+        S = make_smoothing_matrix(fwd['t'], sigma)
     u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs)
     Su           = S @ fwd['u']
     Su_obs       = S @ u_obs_at_fwd

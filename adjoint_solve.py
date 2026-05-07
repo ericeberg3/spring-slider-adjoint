@@ -3,7 +3,7 @@ from friction_derivs import *
 from compute_obj import *
 import numpy as np
 
-def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None):
+def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None, S=None):
     """
     Adjoint solver integrated **forwards in reversed time** τ = T - t using
     the same 3-stage embedded RK scheme as the forward solver.
@@ -35,6 +35,11 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None):
     still uses the grid in fwd['t'].  This lets you advance the adjoint on
     (e.g.) an adaptive time grid while drawing Jacobians from a different
     forward solve (e.g. a Forward-Euler solution).
+
+    Optional S: pre-built smoothing matrix.  If provided, sigma is ignored for
+    the misfit source term.  Pass a plain row-normalised Gaussian (no integration
+    weights) for Forward Euler; omit (or pass None) to use make_smoothing_matrix,
+    which applies trapezoidal integration weights for non-uniform adaptive grids.
     """
     k   = M['k']
     eta = M['eta']
@@ -57,11 +62,12 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None):
 
     # --- smoothed misfit: S^T (S u − S u_obs) ---
     u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs)
-    if sigma is None:
+    if sigma is None and S is None:
         # S = I  →  S^T(Su − Su_obs) = u − u_obs  (no matrix needed)
         smooth_misfit = u_src - u_obs_at_fwd
     else:
-        S             = make_smoothing_matrix(fwd['t'], sigma)
+        if S is None:
+            S = make_smoothing_matrix(fwd['t'], sigma)
         smooth_misfit = S.T @ (S @ u_src - S @ u_obs_at_fwd)   # shape (n,)
 
     # --- reverse arrays so index 0 = t=T, index n-1 = t=0 ---
