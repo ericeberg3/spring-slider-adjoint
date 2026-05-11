@@ -3,7 +3,8 @@ from friction_derivs import *
 from compute_obj import *
 import numpy as np
 
-def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None, S=None):
+def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None, S=None,
+                  smooth_misfit=None):
     """
     Adjoint solver integrated **forwards in reversed time** τ = T - t using
     the same 3-stage embedded RK scheme as the forward solver.
@@ -40,6 +41,12 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None, S=None):
     the misfit source term.  Pass a plain row-normalised Gaussian (no integration
     weights) for Forward Euler; omit (or pass None) to use make_smoothing_matrix,
     which applies trapezoidal integration weights for non-uniform adaptive grids.
+
+    Optional smooth_misfit: pre-computed source array on fwd['t'].  When
+    provided, the internal misfit computation (using S / sigma / u_obs) is
+    skipped entirely.  t_obs and u_obs may be None in this case.  Use this
+    when J is defined on a different grid (e.g. a dense uniform reference
+    grid) and the source has already been interpolated onto the adjoint grid.
     """
     k   = M['k']
     eta = M['eta']
@@ -61,14 +68,15 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None, S=None):
         G_psi_src   = fwd['G_psi']
 
     # --- smoothed misfit: S^T (S u − S u_obs) ---
-    u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs)
-    if sigma is None and S is None:
-        # S = I  →  S^T(Su − Su_obs) = u − u_obs  (no matrix needed)
-        smooth_misfit = u_src - u_obs_at_fwd
-    else:
-        if S is None:
-            S = make_smoothing_matrix(fwd['t'], sigma)
-        smooth_misfit = S.T @ (S @ u_src - S @ u_obs_at_fwd)   # shape (n,)
+    if smooth_misfit is None:
+        u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs)
+        if sigma is None and S is None:
+            # S = I  →  S^T(Su − Su_obs) = u − u_obs  (no matrix needed)
+            smooth_misfit = u_src - u_obs_at_fwd
+        else:
+            if S is None:
+                S = make_smoothing_matrix(fwd['t'], sigma)
+            smooth_misfit = S.T @ (S @ u_src - S @ u_obs_at_fwd)   # shape (n,)
 
     # --- reverse arrays so index 0 = t=T, index n-1 = t=0 ---
     rev  = slice(None, None, -1)
