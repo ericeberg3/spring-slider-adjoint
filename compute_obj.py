@@ -24,3 +24,13 @@ def compute_grad_a(fwd, adj, M):
     """
     integrand = adj['lam'] * fwd['dtau_da'] - adj['r'] * fwd['dG_da']
     return np.trapz(integrand, fwd['t'])
+
+def compute_grad_k(fwd, adj, M):
+    """
+    dJ/dk = int_0^T lambda * (u - V_bg*t) dt
+
+    k enters only via the force balance constraint (k*u - k*V_bg*t);
+    tau and G have no explicit k dependence, so dtau/dk = dG/dk = 0.
+    """
+    integrand = adj['lam'] * (fwd['u'] - M['V_bg'] * fwd['t'])
+    return np.trapz(integrand, fwd['t'])

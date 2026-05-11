@@ -65,3 +65,7 @@ This makes `J` and `dJ/da` consistent, and FD vs adjoint gradients agree to < 1%
 ## Inversion setup
 
 `scipy.optimize.minimize` with `method='trust-constr'` and adjoint gradient. Bounds on `a` are physical (`[0.006, 0.03]`). The `fun_and_grad` function returns `(J, [dJ/da])` together (jac=True). A time-shift inner optimisation is available (`USE_TIME_SHIFT` flag) but currently disabled.
+
+## Github
+
+Make sure to commit and push changes to github when completed.
