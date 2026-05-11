@@ -116,3 +116,10 @@ def make_smoothing_matrix(t, sigma):
     S = np.exp(-diff2) * w[None, :]   # weight columns by node spacing
     S /= S.sum(axis=1, keepdims=True)
     return S
+
+def setup_initial_conditions(M):
+    fss_bg = fss_fn(M['V_bg'], M)
+    psi_ss = M['a'] * np.log(2.0 * M['V0'] / M['V_bg'] * np.sinh(fss_bg / M['a']))
+    V_init = 1.0e-12
+    M['tau0'] = tau_fn(V_init, psi_ss, M) + M['eta'] * V_init
+    return 0.0, psi_ss, V_init
