@@ -23,7 +23,7 @@ def compute_grad_a(fwd, adj, M):
     already stored in adj['lam'] by adjoint_solve.
     """
     integrand = adj['lam'] * fwd['dtau_da'] - adj['r'] * fwd['dG_da']
-    return np.trapz(integrand, fwd['t'])
+    return np.trapz(-integrand, fwd['t'])
 
 def compute_grad_k(fwd, adj, M):
     """
