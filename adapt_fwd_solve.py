@@ -93,3 +93,147 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
         G_psi   = np.array(GP_arr),
         dtau_da = np.array(da_arr),
         dG_da   = np.array(dGa_arr),)
+
+
+def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
+                                  V1_init=None, V2_init=None,
+                                  tol=1e-8, dt0=1.0, dtmax=1e5, safety=0.9):
+    """
+    Adaptive-step forward solve for two symmetrically loaded spring-sliders.
+
+    Topology:   Plate --(k0)--> Block 1 --(k12)--> Block 2 <--(k0)-- Plate
+
+    Force balances (each solved independently for V_i via Brent):
+      Block 1: tau1(V1,psi1) + eta*V1 + (k0+k12)*u1 - k12*u2 = tau0_1 + k0*V_bg*t
+      Block 2: tau2(V2,psi2) + eta*V2 + (k0+k12)*u2 - k12*u1 = tau0_2 + k0*V_bg*t
+
+    M must contain:  a1, a2, k0, k12, tau0_1, tau0_2, eta, V_bg,
+                     and all shared friction params (f0, V0, b, dc, N).
+    """
+    M1 = {**M, 'a': M['a1']}
+    M2 = {**M, 'a': M['a2']}
+    k0, k12, eta = M['k0'], M['k12'], M['eta']
+    tau_L1_fn = lambda t: M['tau0_1'] + k0 * M['V_bg'] * t
+    tau_L2_fn = lambda t: M['tau0_2'] + k0 * M['V_bg'] * t
+
+    def _solve_V1(u1, psi1, u2, t):
+        rhs = tau_L1_fn(t) - (k0 + k12) * u1 + k12 * u2
+        if rhs <= 0.0:
+            raise ValueError(f"Block-1 force-balance RHS={rhs:.4g}<=0 at t={t:.3e}")
+        def res(V): return tau_fn(V, psi1, M1) + eta * V - rhs
+        return brentq(res, 1e-30, rhs / eta, xtol=1e-20, rtol=1e-10)
+
+    def _solve_V2(u1, psi2, u2, t):
+        rhs = tau_L2_fn(t) - (k0 + k12) * u2 + k12 * u1
+        if rhs <= 0.0:
+            raise ValueError(f"Block-2 force-balance RHS={rhs:.4g}<=0 at t={t:.3e}")
+        def res(V): return tau_fn(V, psi2, M2) + eta * V - rhs
+        return brentq(res, 1e-30, rhs / eta, xtol=1e-20, rtol=1e-10)
+
+    def _rhs(u1, psi1, u2, psi2, t):
+        V1 = _solve_V1(u1, psi1, u2, t)
+        V2 = _solve_V2(u1, psi2, u2, t)
+        return V1, G_fn(V1, psi1, M1), V2, G_fn(V2, psi2, M2)
+
+    def _jac(V1, psi1, V2, psi2):
+        return (tau_V_fn(V1, psi1, M1), tau_psi_fn(V1, psi1, M1),
+                G_V_fn(V1, psi1, M1),   G_psi_fn(V1, psi1, M1),
+                dtau_da_fn(V1, psi1, M1), dG_da_fn(V1, psi1, M1),
+                tau_V_fn(V2, psi2, M2), tau_psi_fn(V2, psi2, M2),
+                G_V_fn(V2, psi2, M2),   G_psi_fn(V2, psi2, M2),
+                dtau_da_fn(V2, psi2, M2), dG_da_fn(V2, psi2, M2))
+
+    # Verify / infer initial velocities
+    V1_0 = _solve_V1(u1_0, psi1_0, u2_0, 0.0)
+    V2_0 = _solve_V2(u1_0, psi2_0, u2_0, 0.0)
+    if V1_init is not None:
+        assert abs(V1_0 - V1_init) / V1_init < 1e-6, \
+            f"Block-1 init mismatch: V(0)={V1_0:.6e}, V1_init={V1_init:.6e}"
+    if V2_init is not None:
+        assert abs(V2_0 - V2_init) / V2_init < 1e-6, \
+            f"Block-2 init mismatch: V(0)={V2_0:.6e}, V2_init={V2_init:.6e}"
+
+    # Storage
+    t_arr = [0.0]
+    u1_arr=[u1_0]; psi1_arr=[psi1_0]; V1_arr=[V1_0]
+    u2_arr=[u2_0]; psi2_arr=[psi2_0]; V2_arr=[V2_0]
+    tL1_arr=[tau_L1_fn(0.0)]; tL2_arr=[tau_L2_fn(0.0)]
+
+    j = _jac(V1_0, psi1_0, V2_0, psi2_0)
+    tV1_arr=[j[0]]; tP1_arr=[j[1]]; GV1_arr=[j[2]]; GP1_arr=[j[3]]
+    da1_arr=[j[4]]; dGa1_arr=[j[5]]
+    tV2_arr=[j[6]]; tP2_arr=[j[7]]; GV2_arr=[j[8]]; GP2_arr=[j[9]]
+    da2_arr=[j[10]]; dGa2_arr=[j[11]]
+
+    t  = 0.0
+    u1 = u1_0; psi1 = psi1_0
+    u2 = u2_0; psi2 = psi2_0
+    dt = dt0
+    k1_rhs, G1_rhs, k2_rhs, G2_rhs = _rhs(u1, psi1, u2, psi2, 0.0)
+
+    while t < T:
+        if t + dt > T:
+            dt = T - t
+
+        # --- three-stage embedded RK (same scheme as single-block solver) ---
+        k1_2, G1_2, k2_2, G2_2 = _rhs(
+            u1 + 0.5*dt*k1_rhs,           psi1 + 0.5*dt*G1_rhs,
+            u2 + 0.5*dt*k2_rhs,           psi2 + 0.5*dt*G2_rhs,
+            t + 0.5*dt)
+        k1_3, G1_3, k2_3, G2_3 = _rhs(
+            u1 + dt*(-k1_rhs + 2.0*k1_2), psi1 + dt*(-G1_rhs + 2.0*G1_2),
+            u2 + dt*(-k2_rhs + 2.0*k2_2), psi2 + dt*(-G2_rhs + 2.0*G2_2),
+            t + dt)
+
+        # 2nd-order updates
+        u1_2   = u1   + dt/2.0*(k1_rhs + k1_3)
+        psi1_2 = psi1 + dt/2.0*(G1_rhs + G1_3)
+        u2_2   = u2   + dt/2.0*(k2_rhs + k2_3)
+        psi2_2 = psi2 + dt/2.0*(G2_rhs + G2_3)
+        # 3rd-order updates
+        u1_3   = u1   + dt/6.0*(k1_rhs + 4.0*k1_2 + k1_3)
+        psi1_3 = psi1 + dt/6.0*(G1_rhs + 4.0*G1_2 + G1_3)
+        u2_3   = u2   + dt/6.0*(k2_rhs + 4.0*k2_2 + k2_3)
+        psi2_3 = psi2 + dt/6.0*(G2_rhs + 4.0*G2_2 + G2_3)
+
+        er = np.sqrt((u1_2-u1_3)**2 + (psi1_2-psi1_3)**2 +
+                     (u2_2-u2_3)**2 + (psi2_2-psi2_3)**2)
+
+        if er < tol:
+            t += dt
+            u1 = u1_3; psi1 = psi1_3
+            u2 = u2_3; psi2 = psi2_3
+
+            V1_new = _solve_V1(u1, psi1, u2, t)
+            V2_new = _solve_V2(u1, psi2, u2, t)
+
+            t_arr.append(t)
+            u1_arr.append(u1);   psi1_arr.append(psi1); V1_arr.append(V1_new)
+            u2_arr.append(u2);   psi2_arr.append(psi2); V2_arr.append(V2_new)
+            tL1_arr.append(tau_L1_fn(t)); tL2_arr.append(tau_L2_fn(t))
+
+            j = _jac(V1_new, psi1, V2_new, psi2)
+            tV1_arr.append(j[0]);  tP1_arr.append(j[1])
+            GV1_arr.append(j[2]);  GP1_arr.append(j[3])
+            da1_arr.append(j[4]);  dGa1_arr.append(j[5])
+            tV2_arr.append(j[6]);  tP2_arr.append(j[7])
+            GV2_arr.append(j[8]);  GP2_arr.append(j[9])
+            da2_arr.append(j[10]); dGa2_arr.append(j[11])
+
+            k1_rhs, G1_rhs, k2_rhs, G2_rhs = _rhs(u1, psi1, u2, psi2, t)
+
+        dt = safety * dt * (tol / er)**(1.0/3.0) if er > 0.0 else dtmax
+        dt = min(dt, dtmax)
+
+    return dict(
+        t        = np.array(t_arr),
+        u1       = np.array(u1_arr),  psi1 = np.array(psi1_arr), V1 = np.array(V1_arr),
+        u2       = np.array(u2_arr),  psi2 = np.array(psi2_arr), V2 = np.array(V2_arr),
+        tau_L1   = np.array(tL1_arr), tau_L2 = np.array(tL2_arr),
+        tau_V1   = np.array(tV1_arr), tau_psi1 = np.array(tP1_arr),
+        G_V1     = np.array(GV1_arr), G_psi1   = np.array(GP1_arr),
+        dtau_da1 = np.array(da1_arr), dG_da1   = np.array(dGa1_arr),
+        tau_V2   = np.array(tV2_arr), tau_psi2 = np.array(tP2_arr),
+        G_V2     = np.array(GV2_arr), G_psi2   = np.array(GP2_arr),
+        dtau_da2 = np.array(da2_arr), dG_da2   = np.array(dGa2_arr),
+    )

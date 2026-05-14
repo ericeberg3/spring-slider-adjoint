@@ -132,3 +132,106 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None, S=None, smooth_m
     lam = (p + G_V_src * r) / (tau_V_src + eta)
 
     return dict(t=fwd['t'], p=p, r=r, lam=lam)
+
+
+def adjoint_solve_2block(fwd, t_obs, u1_obs, u2_obs, M, sigma,
+                         S=None, smooth_misfit1=None, smooth_misfit2=None):
+    """
+    Adjoint solver for the two-block symmetrically loaded spring-slider system.
+
+    Adjoint variables: pu1, r1 (=pps1) for Block 1; pu2, r2 (=pps2) for Block 2.
+    Lagrange multipliers:
+        lam1 = (pu1 + G_V1*r1) / (tau_V1 + eta)
+        lam2 = (pu2 + G_V2*r2) / (tau_V2 + eta)
+
+    Reversed-time RHS (dpu_i/dtau, dr_i/dtau):
+        dpu1 = -(k0+k12)*lam1 + k12*lam2 - sm1
+        dr1  = -tau_psi1*lam1 + G_psi1*r1
+        dpu2 = +k12*lam1 - (k0+k12)*lam2 - sm2
+        dr2  = -tau_psi2*lam2 + G_psi2*r2
+
+    Pass u1_obs=None or u2_obs=None to exclude that block from the misfit.
+    IC: all adjoint variables zero at t=T.
+    """
+    k0, k12, eta = M['k0'], M['k12'], M['eta']
+    n = len(fwd['t'])
+
+    # --- smoothed misfit sources ---
+    def _build_sm(u_src, u_obs_arr):
+        if u_obs_arr is None:
+            return np.zeros(n)
+        u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs_arr)
+        if sigma is None and S is None:
+            return u_src - u_obs_at_fwd
+        _S = S if S is not None else make_smoothing_matrix(fwd['t'], sigma)
+        return _S.T @ (_S @ u_src - _S @ u_obs_at_fwd)
+
+    if smooth_misfit1 is None:
+        smooth_misfit1 = _build_sm(fwd['u1'], u1_obs)
+    if smooth_misfit2 is None:
+        smooth_misfit2 = _build_sm(fwd['u2'], u2_obs)
+
+    # --- reverse all forward arrays ---
+    rev = slice(None, None, -1)
+    tV1_r = fwd['tau_V1'][rev];   tP1_r = fwd['tau_psi1'][rev]
+    GV1_r = fwd['G_V1'][rev];     GP1_r = fwd['G_psi1'][rev]
+    tV2_r = fwd['tau_V2'][rev];   tP2_r = fwd['tau_psi2'][rev]
+    GV2_r = fwd['G_V2'][rev];     GP2_r = fwd['G_psi2'][rev]
+    sm1_r = smooth_misfit1[rev];  sm2_r = smooth_misfit2[rev]
+    t_r   = fwd['t'][rev]
+
+    pu1_r = np.zeros(n); r1_r = np.zeros(n)
+    pu2_r = np.zeros(n); r2_r = np.zeros(n)
+
+    def _rhs(pu1, r1, pu2, r2, tV1, tP1, GV1, GP1, sm1,
+                               tV2, tP2, GV2, GP2, sm2):
+        lam1 = (pu1 + GV1 * r1) / (tV1 + eta)
+        lam2 = (pu2 + GV2 * r2) / (tV2 + eta)
+        dpu1 = -(k0 + k12) * lam1 + k12 * lam2 - sm1
+        dr1  = -tP1 * lam1 + GP1 * r1
+        dpu2 =  k12 * lam1 - (k0 + k12) * lam2 - sm2
+        dr2  = -tP2 * lam2 + GP2 * r2
+        return dpu1, dr1, dpu2, dr2
+
+    for j in range(n - 1):
+        dt_tau = t_r[j] - t_r[j + 1]   # > 0
+
+        pu1j, r1j = pu1_r[j], r1_r[j]
+        pu2j, r2j = pu2_r[j], r2_r[j]
+
+        # stage-1 (α=0)
+        c1 = (tV1_r[j], tP1_r[j], GV1_r[j], GP1_r[j], sm1_r[j],
+              tV2_r[j], tP2_r[j], GV2_r[j], GP2_r[j], sm2_r[j])
+        # stage-2 (α=½, linear interpolation)
+        c2 = (0.5*(tV1_r[j]+tV1_r[j+1]), 0.5*(tP1_r[j]+tP1_r[j+1]),
+              0.5*(GV1_r[j]+GV1_r[j+1]), 0.5*(GP1_r[j]+GP1_r[j+1]),
+              0.5*(sm1_r[j]+sm1_r[j+1]),
+              0.5*(tV2_r[j]+tV2_r[j+1]), 0.5*(tP2_r[j]+tP2_r[j+1]),
+              0.5*(GV2_r[j]+GV2_r[j+1]), 0.5*(GP2_r[j]+GP2_r[j+1]),
+              0.5*(sm2_r[j]+sm2_r[j+1]))
+        # stage-3 (α=1)
+        c3 = (tV1_r[j+1], tP1_r[j+1], GV1_r[j+1], GP1_r[j+1], sm1_r[j+1],
+              tV2_r[j+1], tP2_r[j+1], GV2_r[j+1], GP2_r[j+1], sm2_r[j+1])
+
+        dpu1_1, dr1_1, dpu2_1, dr2_1 = _rhs(pu1j, r1j, pu2j, r2j, *c1)
+
+        pu1_2 = pu1j + 0.5*dt_tau*dpu1_1; r1_2 = r1j + 0.5*dt_tau*dr1_1
+        pu2_2 = pu2j + 0.5*dt_tau*dpu2_1; r2_2 = r2j + 0.5*dt_tau*dr2_1
+        dpu1_2, dr1_2, dpu2_2, dr2_2 = _rhs(pu1_2, r1_2, pu2_2, r2_2, *c2)
+
+        pu1_3 = pu1j + dt_tau*(-dpu1_1+2.0*dpu1_2); r1_3 = r1j + dt_tau*(-dr1_1+2.0*dr1_2)
+        pu2_3 = pu2j + dt_tau*(-dpu2_1+2.0*dpu2_2); r2_3 = r2j + dt_tau*(-dr2_1+2.0*dr2_2)
+        dpu1_3, dr1_3, dpu2_3, dr2_3 = _rhs(pu1_3, r1_3, pu2_3, r2_3, *c3)
+
+        pu1_r[j+1] = pu1j + dt_tau/6.0*(dpu1_1 + 4.0*dpu1_2 + dpu1_3)
+        r1_r[j+1]  = r1j  + dt_tau/6.0*(dr1_1  + 4.0*dr1_2  + dr1_3)
+        pu2_r[j+1] = pu2j + dt_tau/6.0*(dpu2_1 + 4.0*dpu2_2 + dpu2_3)
+        r2_r[j+1]  = r2j  + dt_tau/6.0*(dr2_1  + 4.0*dr2_2  + dr2_3)
+
+    pu1 = pu1_r[rev]; r1 = r1_r[rev]
+    pu2 = pu2_r[rev]; r2 = r2_r[rev]
+
+    lam1 = (pu1 + fwd['G_V1'] * r1) / (fwd['tau_V1'] + eta)
+    lam2 = (pu2 + fwd['G_V2'] * r2) / (fwd['tau_V2'] + eta)
+
+    return dict(t=fwd['t'], pu1=pu1, r1=r1, lam1=lam1, pu2=pu2, r2=r2, lam2=lam2)
