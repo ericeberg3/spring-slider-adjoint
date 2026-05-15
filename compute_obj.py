@@ -81,4 +81,4 @@ def compute_grad_k0(fwd, adj, M):
 def compute_grad_k12(fwd, adj, M):
     """dJ/dk12 = int [ (lam2 - lam1)*(u1 - u2) ] dt"""
     del M  # k12 gradient has no explicit M dependence; M kept for API consistency
-    return np.trapz((adj['lam2'] - adj['lam1']) * (fwd['u1'] - fwd['u2']), fwd['t'])
+    return np.trapz(-(adj['lam2'] - adj['lam1']) * (fwd['u1'] - fwd['u2']), fwd['t'])
