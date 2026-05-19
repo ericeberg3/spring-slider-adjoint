@@ -157,14 +157,34 @@ def adjoint_solve_2block(fwd, t_obs, u1_obs, u2_obs, M, sigma,
     n = len(fwd['t'])
 
     # --- smoothed misfit sources ---
+    # def _build_sm(u_src, u_obs_arr):
+    #     if u_obs_arr is None:
+    #         return np.zeros(n)
+    #     u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs_arr)
+    #     if sigma is None and S is None:
+    #         return u_src - u_obs_at_fwd
+    #     _S = S if S is not None else make_smoothing_matrix(fwd['t'], sigma)
+    #     return _S.T @ (_S @ u_src - _S @ u_obs_at_fwd)
+    # --- smoothed misfit sources ---
     def _build_sm(u_src, u_obs_arr):
         if u_obs_arr is None:
             return np.zeros(n)
         u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs_arr)
         if sigma is None and S is None:
             return u_src - u_obs_at_fwd
+        
         _S = S if S is not None else make_smoothing_matrix(fwd['t'], sigma)
-        return _S.T @ (_S @ u_src - _S @ u_obs_at_fwd)
+        
+        # --- NEW: Compute trapezoidal weights W for non-uniform time grid ---
+        t = fwd['t']
+        W = np.zeros_like(t)
+        W[1:-1] = 0.5 * (t[2:] - t[:-2])
+        W[0]  = 0.5 * (t[1] - t[0])
+        W[-1] = 0.5 * (t[-1] - t[-2])
+        
+        # Compute weighted adjoint source
+        misfit = _S @ u_src - _S @ u_obs_at_fwd
+        return (1.0 / W) * (_S.T @ (W * misfit))
 
     if smooth_misfit1 is None:
         smooth_misfit1 = _build_sm(fwd['u1'], u1_obs)
