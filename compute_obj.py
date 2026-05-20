@@ -40,19 +40,48 @@ def compute_grad_k(fwd, adj, M):
 # Two-block objective and gradients
 # ------------------------------------------------------------------
 
-def compute_J_2block(fwd, t_obs, u1_obs, u2_obs, sigma, S=None):
+# def compute_J_2block(fwd, t_obs, u1_obs, u2_obs, sigma, S=None):
+#     """J = J1 + J2 where Ji = 0.5*int(S*ui - S*ui_obs)^2 dt.
+#     Pass u1_obs=None or u2_obs=None to exclude that block."""
+#     t = fwd['t']
+#     if S is None:
+#         S = make_smoothing_matrix(t, sigma)
+#     J = 0.0
+#     for u, u_obs_arr in ((fwd['u1'], u1_obs), (fwd['u2'], u2_obs)):
+#         if u_obs_arr is None:
+#             continue
+#         u_obs_at_fwd = np.interp(t, t_obs, u_obs_arr)
+#         Su = S @ u; Su_obs = S @ u_obs_at_fwd
+#         J += 0.5 * np.trapz((Su - Su_obs)**2, t)
+#     return J
+
+def compute_J_2block(fwd, t_obs, u1_obs, u2_obs, sigma, t_ref, S=None):
     """J = J1 + J2 where Ji = 0.5*int(S*ui - S*ui_obs)^2 dt.
     Pass u1_obs=None or u2_obs=None to exclude that block."""
-    t = fwd['t']
+    
     if S is None:
-        S = make_smoothing_matrix(t, sigma)
+        # Build the smoothing matrix exclusively on the uniform grid
+        S = make_smoothing_matrix(t_ref, sigma)
+        
     J = 0.0
-    for u, u_obs_arr in ((fwd['u1'], u1_obs), (fwd['u2'], u2_obs)):
+    
+    for u_native, u_obs_arr in ((fwd['u1'], u1_obs), (fwd['u2'], u2_obs)):
         if u_obs_arr is None:
             continue
-        u_obs_at_fwd = np.interp(t, t_obs, u_obs_arr)
-        Su = S @ u; Su_obs = S @ u_obs_at_fwd
-        J += 0.5 * np.trapz((Su - Su_obs)**2, t)
+            
+        # 1. Map forward prediction from native adaptive grid -> uniform grid
+        u_ref = np.interp(t_ref, fwd['t'], u_native)
+        
+        # 2. Map observation data -> uniform grid
+        u_obs_ref = np.interp(t_ref, t_obs, u_obs_arr)
+        
+        # 3. Apply smoothing strictly in the uniform space
+        Su = S @ u_ref 
+        Su_obs = S @ u_obs_ref
+        
+        # 4. Integrate using the uniform t_ref
+        J += 0.5 * np.trapz((Su - Su_obs)**2, t_ref)
+        
     return J
 
 
