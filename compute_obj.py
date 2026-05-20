@@ -65,15 +65,15 @@ def compute_grad_a1(fwd, adj, M):
 def compute_grad_a2(fwd, adj, M):
     """dJ/da2 = int [ -lam2*(dtau2/da2) + r2*(dG2/da2) ] dt"""
     integrand = adj['lam2'] * fwd['dtau_da2'] - adj['r2'] * fwd['dG_da2']
-    return np.trapz(-integrand, fwd['t'])
+    return np.trapz(integrand, fwd['t'])
 
 
 def compute_grad_k0(fwd, adj, M):
     """dJ/dk0 = int [ -lam1*(u1 - V_bg*t) - lam2*(u2 - V_bg*t) ] dt"""
     t = fwd['t']
     return np.trapz(
-        +adj['lam1'] * (fwd['u1'] - M['V_bg'] * t)
-        + adj['lam2'] * (fwd['u2'] - M['V_bg'] * t),
+        -adj['lam1'] * (fwd['u1'] - M['V_bg'] * t)
+        - adj['lam2'] * (fwd['u2'] - M['V_bg'] * t),
         t
     )
 
@@ -81,4 +81,4 @@ def compute_grad_k0(fwd, adj, M):
 def compute_grad_k12(fwd, adj, M):
     """dJ/dk12 = int [ (lam2 - lam1)*(u1 - u2) ] dt"""
     del M  # k12 gradient has no explicit M dependence; M kept for API consistency
-    return np.trapz(-(adj['lam2'] - adj['lam1']) * (fwd['u1'] - fwd['u2']), fwd['t'])
+    return np.trapz((adj['lam2'] - adj['lam1']) * (fwd['u1'] - fwd['u2']), fwd['t'])

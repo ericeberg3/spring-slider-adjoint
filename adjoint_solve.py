@@ -207,9 +207,9 @@ def adjoint_solve_2block(fwd, t_obs, u1_obs, u2_obs, M, sigma,
                                tV2, tP2, GV2, GP2, sm2):
         lam1 = (pu1 + GV1 * r1) / (tV1 + eta)
         lam2 = (pu2 + GV2 * r2) / (tV2 + eta)
-        dpu1 = -(k0 + k12) * lam1 + k12 * lam2 - sm1
+        dpu1 = -(k0 + k12) * lam1 + k12 * lam2 + sm1
         dr1  = -tP1 * lam1 + GP1 * r1
-        dpu2 =  k12 * lam1 - (k0 + k12) * lam2 - sm2
+        dpu2 =  k12 * lam1 - (k0 + k12) * lam2 + sm2
         dr2  = -tP2 * lam2 + GP2 * r2
         return dpu1, dr1, dpu2, dr2
 
