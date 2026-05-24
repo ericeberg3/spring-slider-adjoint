@@ -63,14 +63,30 @@ def _eval_J(fwd, u1_on, u2_on, sigma):
     return 0.5 * np.trapz(r1**2 + r2**2, fwd['t'])
 
 
+def _eval_J_on_tref(fwd, u1_obs_ref, u2_obs_ref, t_ref, S_fixed):
+    """Inversion-style J: interpolate u1, u2 to a fixed uniform t_ref and
+    apply a precomputed S_fixed.  Mirrors fun_and_grad in the notebook so the
+    landscape and the optimizer see the same objective."""
+    u1r = np.interp(t_ref, fwd['t'], fwd['u1'])
+    u2r = np.interp(t_ref, fwd['t'], fwd['u2'])
+    r1  = S_fixed @ u1r - S_fixed @ u1_obs_ref
+    r2  = S_fixed @ u2r - S_fixed @ u2_obs_ref
+    return 0.5 * np.trapz(r1**2 + r2**2, t_ref)
+
+
 def evaluate_landscape_point(p_val, scan_param, M_true, T,
                               V1_init, V2_init, u_const,
                               t_obs, u1_obs, u2_obs,
                               sigmas, compute_gradient):
     """Forward-solve at one parameter value; return J (and grad) per sigma.
 
-    `sigmas` is a list of (label, sigma) pairs. `u_const` is the tuple
-    (u1_0, psi1_0, u2_0, psi2_0) used when scan_param is not a1/a2.
+    `sigmas` is a list of entries describing each J evaluation:
+        (label, sigma)                          — native-grid Gaussian smoothing
+        (label, sigma, t_ref, S_fixed)          — inversion-style J: interpolate
+                                                  to t_ref then apply precomputed
+                                                  S_fixed (mirrors fun_and_grad).
+    `u_const` is the tuple (u1_0, psi1_0, u2_0, psi2_0) used when scan_param is
+    not a1/a2.
     """
     t_start = time.perf_counter()
     Mc = dict(M_true)
@@ -103,8 +119,25 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
     grad_fn = _GRAD_FNS[scan_param] if compute_gradient else None
     Js, grads = [], []
     t_adj0 = time.perf_counter()
-    for _, sigma in sigmas:
-        Js.append(_eval_J(fwd, u1_on, u2_on, sigma))
+    for entry in sigmas:
+        # Back-compat: (label, sigma) -> native-grid J.
+        # Inversion-style: (label, sigma, t_ref, S_fixed) -> fixed-grid J.
+        if len(entry) == 2:
+            _, sigma = entry
+            t_ref_e, S_fixed_e = None, None
+        elif len(entry) == 4:
+            _, sigma, t_ref_e, S_fixed_e = entry
+        else:
+            raise ValueError(f"sigmas entry has unexpected length {len(entry)}")
+
+        if t_ref_e is not None:
+            u1_obs_ref_e = np.interp(t_ref_e, t_obs, u1_obs)
+            u2_obs_ref_e = np.interp(t_ref_e, t_obs, u2_obs)
+            Js.append(_eval_J_on_tref(fwd, u1_obs_ref_e, u2_obs_ref_e,
+                                      t_ref_e, S_fixed_e))
+        else:
+            Js.append(_eval_J(fwd, u1_on, u2_on, sigma))
+
         if compute_gradient:
             try:
                 adj = adjoint_solve_2block(fwd, fwd['t'], u1_on, u2_on, Mc, sigma)

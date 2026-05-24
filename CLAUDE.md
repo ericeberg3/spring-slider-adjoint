@@ -77,7 +77,7 @@ dr1/dτ  = -tau_psi1*lam1 + G_psi1*r1
 dpu2/dτ = +k12*lam1 - (k0+k12)*lam2 - sm2
 dr2/dτ  = -tau_psi2*lam2 + G_psi2*r2
 ```
-IC: all zero at τ=0 (t=T). Note the **minus sign** on the smoothed-misfit source terms (`-sm`), matching the single-block convention.
+IC: all zero at τ=0 (t=T). Source terms enter with a **minus sign** (`-sm`), matching the single-block convention in `adjoint_solve`.
 
 ## Gradient formulas
 
