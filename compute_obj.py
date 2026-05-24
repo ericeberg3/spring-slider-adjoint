@@ -94,7 +94,7 @@ def compute_grad_a1(fwd, adj, M):
 def compute_grad_a2(fwd, adj, M):
     """dJ/da2 = int [ -lam2*(dtau2/da2) + r2*(dG2/da2) ] dt"""
     integrand = adj['lam2'] * fwd['dtau_da2'] - adj['r2'] * fwd['dG_da2']
-    return np.trapz(integrand, fwd['t'])
+    return np.trapz(-integrand, fwd['t'])
 
 
 def compute_grad_k0(fwd, adj, M):
@@ -106,8 +106,21 @@ def compute_grad_k0(fwd, adj, M):
         t
     )
 
-
 def compute_grad_k12(fwd, adj, M):
     """dJ/dk12 = int [ (lam2 - lam1)*(u1 - u2) ] dt"""
     del M  # k12 gradient has no explicit M dependence; M kept for API consistency
     return np.trapz((adj['lam2'] - adj['lam1']) * (fwd['u1'] - fwd['u2']), fwd['t'])
+
+def trapz_weights(t):
+    w = np.zeros(len(t)); w[:-1] += np.diff(t); w[1:] += np.diff(t)
+    return 0.5 * w
+
+def interp_adjoint_scatter(v, t_src, t_dst):
+    """True adjoint of linear interp P: t_src -> t_dst.  P^T v via scatter-add."""
+    idx = np.searchsorted(t_src, t_dst, side='right') - 1
+    idx = np.clip(idx, 0, len(t_src) - 2)
+    alpha = np.clip((t_dst - t_src[idx]) / (t_src[idx + 1] - t_src[idx]), 0.0, 1.0)
+    result = np.zeros(len(t_src))
+    np.add.at(result, idx,     (1.0 - alpha) * v)
+    np.add.at(result, idx + 1, alpha          * v)
+    return result
