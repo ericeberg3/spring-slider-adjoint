@@ -97,7 +97,7 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
 
 def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
                                   V1_init=None, V2_init=None,
-                                  tol=1e-8, dt0=1.0, dtmax=1e5, safety=0.9):
+                                  tol=1e-12, dt0=1.0, dtmax=1e5, safety=0.9):
     """
     Adaptive-step forward solve for two symmetrically loaded spring-sliders.
 
