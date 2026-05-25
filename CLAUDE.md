@@ -4,46 +4,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-Adjoint-based inversion of rate-and-state friction parameters for spring-slider models of afterslip. Two configurations are supported:
+Gradient-based inversion of rate-and-state friction parameters for spring-slider models of afterslip. Two configurations are supported:
 
-- **Single-block**: invert for `a` (and optionally `k`). One spring couples the block to the loading plate.
-- **Two-block (symmetric, Abe & Kato 2013)**: invert for any subset of `{a1, a2, k0, k12}`. Topology: `Plate ←(k0)→ Block 1 ←(k12)→ Block 2 ←(k0)→ Plate`.
+- **Single-block**: invert for `a` (and optionally `k`). One spring couples the block to the loading plate. Still uses the continuous adjoint (legacy).
+- **Two-block (symmetric, Abe & Kato 2013)**: invert for any subset of `{a1, a2, k0, k12}`. Topology: `Plate ←(k0)→ Block 1 ←(k12)→ Block 2 ←(k0)→ Plate`. **Two-block now uses forward sensitivity** (Cao, Li, Petzold 2003), not the adjoint.
 
-The forward model integrates a DAE (force balance + two ODEs per block), and the adjoint solver computes exact gradients `dJ/d(params)`.
+The forward model integrates a DAE (force balance + two ODEs per block). For the two-block case, forward sensitivity equations `ds_x/dp = ∂x/∂p` are integrated alongside the nominal state on the same adaptive grid, and `dJ/dp` is computed from a single combined pass.
+
+## Why forward sensitivity (two-block)
+
+The continuous adjoint with an adaptively-stepped forward solver became **dual-inconsistent** during fast slip events: the adjoint integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup (the explicit RK3 adjoint and a Radau adjoint agreed with each other but disagreed with FD by many orders of magnitude on long horizons). See Alexe & Sandu, *J. Comput. Appl. Math.* 233 (2009) for the general phenomenon.
+
+Forward sensitivity sidesteps this entirely:
+- integrated on the same adaptive grid as the nominal state (no separate interpolation),
+- no reverse-time integration through near-singular regions,
+- produces the *exact* gradient of the discretised `J` by construction.
+
+With 4 parameters and 1 scalar output `J`, forward sensitivity costs ~5× a forward solve — well-justified.
 
 ## Running the code
 
 The primary workflow is through Jupyter notebooks:
-- `slip_adjoint_springslider_adapttime.ipynb` — single-block: forward solve, adjoint, gradient validation, J(a) landscape, inversion
-- `slip_adjoint_double_springslider.ipynb` — two-block: forward solve, adjoint, gradient validation, inversion for a1/a2/k0/k12 (in progress)
-- `adjoint_springslider.ipynb` — earlier development notebook
+- `slip_adjoint_double_springslider.ipynb` — two-block: forward+sensitivity solve, gradient validation (FS vs FD), J landscape, inversion for `a1`/`a2`/`k0`/`k12` via forward sensitivity
+- `slip_adjoint_springslider_adapttime.ipynb` — single-block (legacy, still uses adjoint)
+- `adjoint_springslider.ipynb` — earlier single-block dev notebook
 - `visualize_objective.ipynb` — objective function visualization
 
-The Python modules use `%autoreload 2` in the notebooks, so edits to `.py` files are picked up without restarting the kernel.
+The Python modules use `%autoreload 2` in the notebooks.
 
-No test runner is configured. Gradient correctness is validated inline via finite-difference checks in the notebooks. The key check: `rel_err = |adj_grad - fd_grad| / |fd_grad| < 5%`.
+No test runner. Gradient correctness is validated inline via FD checks in the notebooks. The key check: `rel_err = |fs_grad - fd_grad| / |fd_grad| < 5%`.
 
 ## Module dependency order
 
 ```
 friction_derivs.py   ← physics primitives (no imports from project)
       ↓
-adapt_fwd_solve.py   ← adaptive RK forward solver
+adapt_fwd_solve.py   ← adaptive RK forward solver (nominal + sensitivity)
       ↓
-adjoint_solve.py     ← adjoint solver (imports all three above)
+adjoint_solve.py     ← single-block adjoint (legacy)
       ↓
-compute_obj.py       ← J and dJ/da (imports all four above)
+compute_obj.py       ← J and dJ/dp (forward-sensitivity gradient for two-block)
 ```
+
+`landscape_worker.py` is a process-pool worker for the J-landscape scan; it uses the sensitivity solver when `COMPUTE_GRADIENT=True`.
 
 ## Physics
 
-**Friction law (both blocks):** regularised RS, `tau = N*a*arcsinh(V/(2V0) * exp(psi/a))`  
-**State evolution:** aging law (Dieterich), `dpsi/dt = (b*V0/dc)*exp(-(psi-f0)/b) - b*V/dc`  
+**Friction law (both blocks):** regularised RS, `tau = N*a*arcsinh(V/(2V0) * exp(psi/a))`
+**State evolution:** aging law (Dieterich), `dpsi/dt = (b*V0/dc)*exp(-(psi-f0)/b) - b*V/dc`
 where `psi = f0 + b*ln(theta*V0/dc)` and theta is the Dieterich state variable.
 
-### Single-block
-**Algebraic constraint:** `tau(V,psi) + eta*V + k*u = tau_L(t)`, solved for `V` via `brentq`  
-**Loading:** `tau_L(t) = tau0 + k*V_bg*t`  
+### Single-block (legacy)
+**Algebraic constraint:** `tau(V,psi) + eta*V + k*u = tau_L(t)`, solved for `V` via `brentq`
+**Loading:** `tau_L(t) = tau0 + k*V_bg*t`
 **`M` keys:** `f0, V0, a, b, dc, N, eta, k, V_bg, tau0`
 
 ### Two-block (symmetric, Abe & Kato 2013)
@@ -52,79 +65,79 @@ where `psi = f0 + b*ln(theta*V0/dc)` and theta is the Dieterich state variable.
 Block 1: tau1 + eta*V1 + (k0+k12)*u1 - k12*u2 = tau0_1 + k0*V_bg*t
 Block 2: tau2 + eta*V2 + (k0+k12)*u2 - k12*u1 = tau0_2 + k0*V_bg*t
 ```
-Both blocks are independently loaded by the plate via `k0`; `k12` is the coupling spring.  
-**`M` keys:** `f0, V0, a1, a2, b, dc, N, eta, k0, k12, V_bg, tau0_1, tau0_2`  
+Both blocks are independently loaded by the plate via `k0`; `k12` is the coupling spring.
+**`M` keys:** `f0, V0, a1, a2, b, dc, N, eta, k0, k12, V_bg, tau0_1, tau0_2`
 `tau0_1` and `tau0_2` are computed by `setup_initial_conditions_2block(M)` in `friction_derivs.py`.
 
 ## Numerical scheme
 
-Both forward and adjoint solvers use the **same 3-stage embedded RK method** (2nd/3rd-order error-control pair). The adjoint integrates forwards in reversed time `τ = T - t` through the stored forward grid, linearly interpolating Jacobian coefficients at `α ∈ {0, ½, 1}`.
+The forward solver uses a 3-stage embedded RK method (2nd/3rd-order error-control pair).
 
-**Single-block forward** returns: `t, u, psi, V, tau_L, tau_V, tau_psi, G_V, G_psi, dtau_da, dG_da`  
-**Single-block adjoint** returns: `t, p, r, lam` where `lam = (p + G_V*r)/(tau_V+eta)`
+**`forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0, ...)`** returns:
+`t, u1, psi1, V1, u2, psi2, V2, tau_L1, tau_L2` plus per-block Jacobians.
 
-**Two-block forward** returns: `t, u1, psi1, V1, u2, psi2, V2, tau_L1, tau_L2` plus per-block Jacobians `tau_V1/2, tau_psi1/2, G_V1/2, G_psi1/2, dtau_da1/2, dG_da1/2`  
-**Two-block adjoint** returns: `t, pu1, r1, lam1, pu2, r2, lam2`
+**`forward_solve_adaptive_2block_sens(M, T, u1_0, psi1_0, u2_0, psi2_0, params=('a1','a2','k0','k12'), ...)`** returns the same `t/u/psi/V/tau_L` plus `sens[p] = {'s_u1','s_psi1','s_u2','s_psi2'}` for each parameter `p`. The error controller monitors only the nominal state, so the adaptive grid is identical to the nominal-only solver at the same tolerance.
 
-## Two-block adjoint equations (reversed time τ = T - t)
+## Forward sensitivity equations (two-block, aging law)
+
+For each parameter `p`, with `s_x = ∂x/∂p`:
+
+**Algebraic sensitivity** (from differentiating the force balance):
+```
+sigma_V_i = dV_i/dp = -[dF_i/dp + (k0+k12)*s_u_i - k12*s_u_j + tau_psi_i*s_psi_i] / (tau_V_i + eta)
+```
+
+**Sensitivity ODEs** (aging law: explicit ∂G/∂p = 0 for all four parameters):
+```
+ds_u_i/dt   = sigma_V_i
+ds_psi_i/dt = G_V_i * sigma_V_i + G_psi_i * s_psi_i
+```
+
+**Explicit ∂F/∂p** (with `tau0_i` treated as independent — frozen-IC convention):
+```
+p='a1':  dF1/da1 = dtau_da1,        dF2/da1 = 0
+p='a2':  dF1/da2 = 0,                dF2/da2 = dtau_da2
+p='k0':  dF1/dk0 = u1 - V_bg*t,      dF2/dk0 = u2 - V_bg*t
+p='k12': dF1/dk12 = u1 - u2,         dF2/dk12 = u2 - u1
+```
+
+## Gradient formula
 
 ```
-lam1 = (pu1 + G_V1*r1) / (tau_V1 + eta)
-lam2 = (pu2 + G_V2*r2) / (tau_V2 + eta)
-
-dpu1/dτ = -(k0+k12)*lam1 + k12*lam2 + sm1
-dr1/dτ  = -tau_psi1*lam1 + G_psi1*r1
-dpu2/dτ = +k12*lam1 - (k0+k12)*lam2 + sm2
-dr2/dτ  = -tau_psi2*lam2 + G_psi2*r2
+dJ/dp = sum_{i=1,2} int_{t_ref} (S*u_i - S*u_{i,obs}) * (S * (du_i/dp)_ref) dt_ref
 ```
-IC: all zero at τ=0 (t=T). Source terms enter with a **plus sign** (`+sm`) in the two-block case — this is the sign that makes the adjoint match centered-FD with frozen IC and `tau0` in the validation cell. (The single-block `adjoint_solve` still uses `-sm`; the two compute_grad_* functions in `compute_obj` already account for this difference.)
-
-## Gradient formulas
-
-```
-dJ/da1 = ∫ [-lam1*dtau_da1] dt          (dG/da1 = 0 for aging law)
-dJ/da2 = ∫ [-lam2*dtau_da2] dt          (dG/da2 = 0 for aging law)
-dJ/dk0 = ∫ [-lam1*(u1 - V_bg*t) - lam2*(u2 - V_bg*t)] dt
-dJ/dk12 = ∫ [(lam2 - lam1)*(u1 - u2)] dt
-```
+where `(du_i/dp)_ref = np.interp(t_ref, t_fwd, s_u_i)`. Implemented in `compute_grad_forward_sens_2block`.
 
 ## Aging law Jacobians
 
 ```
-G_V   = -b/dc                              (constant, no V or psi dependence)
+G_V   = -b/dc                              (constant)
 G_psi = -(V0/dc) * exp(-(psi-f0)/b)
-dG/da = 0                                  (G does not depend on a)
+dG/da = dG/dk0 = dG/dk12 = 0               (G does not depend on a, k0, k12)
 ```
 
 ## Smoothing matrix
 
-`make_smoothing_matrix(t, sigma)` in `friction_derivs.py` builds a row-normalised Gaussian `S` with **trapezoidal integration weights** on each column. This corrects for non-uniform node spacing on adaptive grids — without it, dense intervals are over-weighted and `S` no longer represents a fixed-time-window average.
+`make_smoothing_matrix(t, sigma)` in `friction_derivs.py` builds a row-normalised Gaussian `S` with **trapezoidal integration weights** on each column. This corrects for non-uniform node spacing on adaptive grids.
 
-For uniform (Forward Euler) grids, a plain row-normalised Gaussian (no weights) is correct. These two conventions must not be mixed when comparing FE and adaptive results.
+For uniform grids the weights are constant and cancel, recovering the standard un-weighted Gaussian.
 
 ## Gradient consistency requirement
 
-Because `S` depends on the forward time grid (which changes with `a`), finite-difference gradients computed with per-solve `S` matrices contain a **spurious grid-variation contribution** that the adjoint does not compute. The correct approach — used in the inversion cell — is:
-
-1. Fix a **reference time grid** `t_ref` (built once at `a_init`, or a uniform linspace)
-2. Fix `S_fixed = make_smoothing_matrix(t_ref, sigma)` for the entire inversion
-3. Interpolate every forward solve onto `t_ref` before evaluating `J` and the adjoint
-
-This makes `J` and `dJ/da` consistent, and FD vs adjoint gradients agree to < 1%.
+Both `J` and `dJ/dp` are evaluated on a **fixed reference grid `t_ref`** (built once at the initial guess, uniform). Forward solutions and their sensitivities are interpolated from the native adaptive grid onto `t_ref` before assembling `J` and the gradient. This makes the computed gradient self-consistent with the `J` the optimiser sees, and FD vs forward-sensitivity gradients agree to within numerical noise.
 
 ## Inversion setup
 
-**Single-block:** `scipy.optimize.minimize` with `method='trust-constr'` and adjoint gradient. Bounds on `a` are physical (`[0.006, 0.03]`). The `fun_and_grad` function returns `(J, [dJ/da])` together (jac=True). A time-shift inner optimisation is available (`USE_TIME_SHIFT` flag) but currently disabled.
-
-**Two-block:** `INVERT_PARAMS` list controls which subset of `['a1', 'a2', 'k0', 'k12']` are optimised. Uses fixed reference grid + `S_fixed` strategy (same as single-block).
-
-`fun_and_grad` deliberately **does not** recompute `tau0_1`/`tau0_2`/`psi*_0` per iterate, even when `a1`/`a2` change. Recomputing them introduces an implicit `a`-dependence in the IC (`psi_ss(a)`) and `tau0(a)` that the adjoint does not see, which flips the gradient sign and stalls the optimizer. Instead, IC (`u*_0_inv`, `psi*_0_inv`) is built once from the initial guess `_M0` and frozen for the whole inversion, and `Mc = dict(M_true)` carries `tau0_*` through unchanged. Trade-off: with frozen IC the minimum of `J(a)` is not exactly at `a_true` (because the wrong IC for the iterate biases the trajectory), but the gradient is self-consistent and the optimizer converges to that nearby minimum. To get the minimum exactly at `a_true` you would need to add the IC chain-rule contribution to the gradient (`r1(0)*dpsi1_0/da1 + (-∫lam1 dt)*dtau0_1/da1`).
+**Two-block (`slip_adjoint_double_springslider.ipynb`):**
+- `INVERT_PARAMS` controls which subset of `['a1','a2','k0','k12']` is optimised.
+- `fun_and_grad(x_norm)` runs one `forward_solve_adaptive_2block_sens` per evaluation (sensitivities for exactly `INVERT_PARAMS`), then `compute_grad_forward_sens_2block` extracts the gradient.
+- Parameters are normalised by their initial values (`scales`) so all components are O(1) inside the optimiser.
+- Optimiser: `scipy.optimize.minimize` with `method='trust-constr'` (or `'L-BFGS-B'`), `jac=True`, physical bounds.
+- IC (`u*_0_inv`, `psi*_0_inv`) is built once from the initial guess `_M0` and frozen; `Mc = dict(M_true)` carries `tau0_*` through unchanged. This matches the frozen-IC convention the sensitivity equations are derived under. Recomputing IC per iterate would re-introduce an implicit `a`-dependence in `psi_ss(a)` and `tau0(a)` that the sensitivities (as derived) do not track, biasing the gradient.
 
 ## Known issues / pending work
 
-- **Two-block gradient check**: The adjoint gradients for `a1`/`a2`/`k0`/`k12` have not yet been re-verified against finite differences after the topology change (series → symmetric) and state law change (slip → aging). The a-gradient check requires the fixed reference grid + `S_fixed` approach (see "Gradient consistency requirement"), and `tau0_1`/`tau0_2` must be recomputed consistently in both the adjoint and the FD perturbation.
-- **Single-block gradient check**: The aging law changes `G_fn`, `G_V_fn`, `G_psi_fn`, and `dG_da_fn`. The single-block adjoint and gradient validation cells in `slip_adjoint_springslider_adapttime.ipynb` should be re-run to confirm < 5% relative error.
-- **`slip_adjoint_double_springslider.ipynb`**: Two-block setup cells updated; full gradient validation and inversion cells still need to be implemented for the two-block case.
+- **Single-block notebook** still uses the continuous adjoint and has not been migrated to forward sensitivity. The same migration would apply if needed.
 
 ## Github
 
