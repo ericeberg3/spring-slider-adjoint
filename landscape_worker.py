@@ -80,27 +80,39 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
                               sigmas, compute_gradient):
     """Forward-solve at one parameter value; return J (and grad) per sigma.
 
+    Two forward solves are run when scan_param is a1/a2:
+      - fwd_true: IC recomputed for the scanned a-value (per-point IC).  Used
+        for the native-grid J curves -- these show the "true" J(a) landscape
+        whose minimum is at a_true.
+      - fwd_fix:  IC frozen at `u_const` (the initial-guess IC used by the
+        inversion's fun_and_grad). Used for the inversion-style entries so the
+        landscape curve matches exactly the J the optimizer sees.
+
     `sigmas` is a list of entries describing each J evaluation:
         (label, sigma)                          — native-grid Gaussian smoothing
+                                                  (uses per-point IC for a1/a2)
         (label, sigma, t_ref, S_fixed)          — inversion-style J: interpolate
                                                   to t_ref then apply precomputed
-                                                  S_fixed (mirrors fun_and_grad).
-    `u_const` is the tuple (u1_0, psi1_0, u2_0, psi2_0) used when scan_param is
-    not a1/a2.
+                                                  S_fixed (uses fixed IC u_const).
+    `u_const` is the tuple (u1_0, psi1_0, u2_0, psi2_0); for inversion-style
+    landscapes pass the inversion's u1_0_inv/psi1_0_inv/u2_0_inv/psi2_0_inv.
     """
     t_start = time.perf_counter()
     Mc = dict(M_true)
     Mc[scan_param] = p_val
     if scan_param in ('a1', 'a2'):
-        u1_0, psi1_0, _, u2_0, psi2_0, _ = setup_initial_conditions_2block(
+        u1_0_true, psi1_0_true, _, u2_0_true, psi2_0_true, _ = setup_initial_conditions_2block(
             Mc, V1_init=V1_init, V2_init=V2_init)
+        # Mc['tau0_1'/'tau0_2'] were just mutated for the per-point IC solve.
+        # Save them for the per-point fwd; restore M_true's tau0 for the fixed-IC fwd.
+        tau0_1_true, tau0_2_true = Mc['tau0_1'], Mc['tau0_2']
     else:
-        u1_0, psi1_0, u2_0, psi2_0 = u_const
+        u1_0_true, psi1_0_true, u2_0_true, psi2_0_true = u_const
 
     t_fwd0 = time.perf_counter()
     try:
         fwd = forward_solve_adaptive_2block(
-            Mc, T, u1_0, psi1_0, u2_0, psi2_0,
+            Mc, T, u1_0_true, psi1_0_true, u2_0_true, psi2_0_true,
             V1_init=V1_init, V2_init=V2_init)
     except Exception as e:
         return {'p_val':   p_val,
@@ -116,12 +128,37 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
     u1_on = np.interp(fwd['t'], t_obs, u1_obs)
     u2_on = np.interp(fwd['t'], t_obs, u2_obs)
 
+    # Lazily build the fixed-IC forward solve, only if an inversion-style entry
+    # asks for it. For a1/a2 scans we restore Mc's tau0 to M_true's values so
+    # this fwd mirrors fun_and_grad (Mc = dict(M_true), then Mc[p] = p_val).
+    fwd_fix = None
+    u1_on_fix = u2_on_fix = None
+    def _ensure_fwd_fix():
+        nonlocal fwd_fix, u1_on_fix, u2_on_fix
+        if fwd_fix is not None:
+            return
+        if scan_param in ('a1', 'a2'):
+            Mc['tau0_1'] = M_true['tau0_1']
+            Mc['tau0_2'] = M_true['tau0_2']
+            u1_0_fix, psi1_0_fix, u2_0_fix, psi2_0_fix = u_const
+            fwd_fix_local = forward_solve_adaptive_2block(
+                Mc, T, u1_0_fix, psi1_0_fix, u2_0_fix, psi2_0_fix,
+                V1_init=None, V2_init=None)
+            # restore the per-point tau0 so the adjoint/native-grid path is unaffected
+            Mc['tau0_1'], Mc['tau0_2'] = tau0_1_true, tau0_2_true
+        else:
+            fwd_fix_local = fwd
+        fwd_fix = fwd_fix_local
+        u1_on_fix = np.interp(fwd_fix['t'], t_obs, u1_obs)
+        u2_on_fix = np.interp(fwd_fix['t'], t_obs, u2_obs)
+
     grad_fn = _GRAD_FNS[scan_param] if compute_gradient else None
     Js, grads = [], []
     t_adj0 = time.perf_counter()
     for entry in sigmas:
-        # Back-compat: (label, sigma) -> native-grid J.
-        # Inversion-style: (label, sigma, t_ref, S_fixed) -> fixed-grid J.
+        # Back-compat: (label, sigma) -> native-grid J on the per-point fwd.
+        # Inversion-style: (label, sigma, t_ref, S_fixed) -> fixed-grid J on the
+        # fixed-IC fwd (matches the inversion's fun_and_grad).
         if len(entry) == 2:
             _, sigma = entry
             t_ref_e, S_fixed_e = None, None
@@ -131,9 +168,10 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
             raise ValueError(f"sigmas entry has unexpected length {len(entry)}")
 
         if t_ref_e is not None:
+            _ensure_fwd_fix()
             u1_obs_ref_e = np.interp(t_ref_e, t_obs, u1_obs)
             u2_obs_ref_e = np.interp(t_ref_e, t_obs, u2_obs)
-            Js.append(_eval_J_on_tref(fwd, u1_obs_ref_e, u2_obs_ref_e,
+            Js.append(_eval_J_on_tref(fwd_fix, u1_obs_ref_e, u2_obs_ref_e,
                                       t_ref_e, S_fixed_e))
         else:
             Js.append(_eval_J(fwd, u1_on, u2_on, sigma))

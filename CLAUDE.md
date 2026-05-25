@@ -72,12 +72,12 @@ Both forward and adjoint solvers use the **same 3-stage embedded RK method** (2n
 lam1 = (pu1 + G_V1*r1) / (tau_V1 + eta)
 lam2 = (pu2 + G_V2*r2) / (tau_V2 + eta)
 
-dpu1/dτ = -(k0+k12)*lam1 + k12*lam2 - sm1
+dpu1/dτ = -(k0+k12)*lam1 + k12*lam2 + sm1
 dr1/dτ  = -tau_psi1*lam1 + G_psi1*r1
-dpu2/dτ = +k12*lam1 - (k0+k12)*lam2 - sm2
+dpu2/dτ = +k12*lam1 - (k0+k12)*lam2 + sm2
 dr2/dτ  = -tau_psi2*lam2 + G_psi2*r2
 ```
-IC: all zero at τ=0 (t=T). Source terms enter with a **minus sign** (`-sm`), matching the single-block convention in `adjoint_solve`.
+IC: all zero at τ=0 (t=T). Source terms enter with a **plus sign** (`+sm`) in the two-block case — this is the sign that makes the adjoint match centered-FD with frozen IC and `tau0` in the validation cell. (The single-block `adjoint_solve` still uses `-sm`; the two compute_grad_* functions in `compute_obj` already account for this difference.)
 
 ## Gradient formulas
 
@@ -116,7 +116,9 @@ This makes `J` and `dJ/da` consistent, and FD vs adjoint gradients agree to < 1%
 
 **Single-block:** `scipy.optimize.minimize` with `method='trust-constr'` and adjoint gradient. Bounds on `a` are physical (`[0.006, 0.03]`). The `fun_and_grad` function returns `(J, [dJ/da])` together (jac=True). A time-shift inner optimisation is available (`USE_TIME_SHIFT` flag) but currently disabled.
 
-**Two-block (planned):** `INVERT_PARAMS` list controls which subset of `['a1', 'a2', 'k0', 'k12']` are optimised. `fun_and_grad` recomputes `tau0_1`, `tau0_2` via `setup_initial_conditions_2block` whenever `a1` or `a2` change. Uses fixed reference grid + `S_fixed` strategy (same as single-block).
+**Two-block:** `INVERT_PARAMS` list controls which subset of `['a1', 'a2', 'k0', 'k12']` are optimised. Uses fixed reference grid + `S_fixed` strategy (same as single-block).
+
+`fun_and_grad` deliberately **does not** recompute `tau0_1`/`tau0_2`/`psi*_0` per iterate, even when `a1`/`a2` change. Recomputing them introduces an implicit `a`-dependence in the IC (`psi_ss(a)`) and `tau0(a)` that the adjoint does not see, which flips the gradient sign and stalls the optimizer. Instead, IC (`u*_0_inv`, `psi*_0_inv`) is built once from the initial guess `_M0` and frozen for the whole inversion, and `Mc = dict(M_true)` carries `tau0_*` through unchanged. Trade-off: with frozen IC the minimum of `J(a)` is not exactly at `a_true` (because the wrong IC for the iterate biases the trajectory), but the gradient is self-consistent and the optimizer converges to that nearby minimum. To get the minimum exactly at `a_true` you would need to add the IC chain-rule contribution to the gradient (`r1(0)*dpsi1_0/da1 + (-∫lam1 dt)*dtau0_1/da1`).
 
 ## Known issues / pending work
 
