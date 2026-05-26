@@ -1,25 +1,19 @@
 # spring-slider-sensitivity
 
-Gradient-based inversion for rate-and-state friction parameters in 1-D and 2-block spring-slider models of afterslip. Gradients are computed via **forward sensitivity equations** (Cao, Li, Petzold 2003).
+Gradient-based inversion for rate-and-state friction parameters in 1-D and 2-block spring-slider models of afterslip. Two gradient methods are implemented for the two-block problem: **forward sensitivity equations** (Cao, Li, Petzold 2003) and a **discrete adjoint via JAX/Diffrax automatic differentiation** (current preferred path).
 
 ## Overview
 
-The forward model integrates a DAE (force balance + ODEs for slip `u` and state `psi`) using an adaptive 3-stage embedded RK solver. For the two-block case, **forward sensitivity equations** `ds_x/dp = ∂x/∂p` are integrated alongside the nominal state on the same adaptive grid, giving exact gradients `dJ/dp` for parameters `p ∈ {a1, a2, k0, k12}`.
+The forward model integrates a DAE (force balance + ODEs for slip `u` and state `psi`) using an adaptive embedded RK solver. The objective is `J = 0.5 * ∫(Su - Su_obs)² dt` where `S` is a Gaussian smoothing operator on a fixed reference grid, and the inversion uses `scipy.optimize.minimize` (`trust-constr` / L-BFGS-B) or `basinhopping`, with physical bounds and parameters normalised by their initial values.
 
-**Objective:** `J = 0.5 * ∫(Su - Su_obs)² dt` where `S` is a Gaussian smoothing operator on a fixed reference grid.
+Two gradient paths for `p ∈ {a1, a2, k0, k12}`:
 
-**Inversion:** `scipy.optimize.minimize` with `method='trust-constr'` (or L-BFGS-B), forward-sensitivity gradient, physical bounds.
+1. **Forward sensitivity (numpy)** — `ds_x/dp = ∂x/∂p` integrated alongside the nominal state on the same adaptive grid. Exact gradient of the discretised `J`. Cost ≈ `(1 + n_params) ×` forward solve.
+2. **Discrete adjoint via AD (JAX + Diffrax + Optimistix)** — the two-block model is rewritten in JAX with a differentiable Newton root-find (Optimistix, in `log V`) eliminating `V` inside the ODE RHS, then Diffrax's `Dopri8` stepper is reverse-mode-differentiated using `RecursiveCheckpointAdjoint`. Cost ≈ `O(1) ×` forward solve regardless of parameter count, so this scales to much larger parameter vectors.
 
-## Why forward sensitivity?
+## Why not the continuous adjoint?
 
-An earlier version used the continuous adjoint. With adaptive time stepping and fast slip events (ruptures), the continuous adjoint becomes dual-inconsistent (Alexe & Sandu 2009): it integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup. Two independent adjoint solvers (explicit RK3 and implicit Radau) agreed with each other but disagreed with FD by many orders of magnitude on long horizons.
-
-Forward sensitivity:
-- runs on the same adaptive grid as the nominal state,
-- has no reverse-time integration through near-singular regions,
-- produces the *exact* gradient of the discretised `J`.
-
-With only 4 parameters the cost is modest (~5× a forward solve).
+An earlier version used the continuous adjoint. With adaptive time stepping and fast slip events (ruptures), the continuous adjoint becomes dual-inconsistent (Alexe & Sandu 2009): it integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup. Two independent adjoint solvers (explicit RK3 and implicit Radau) agreed with each other but disagreed with FD by many orders of magnitude on long horizons. Both forward sensitivity and the discrete-adjoint-via-AD path sidestep this — they differentiate the actual discretisation rather than a continuous PDE whose discretisation drifts from the forward grid.
 
 ## Physics
 
@@ -38,19 +32,19 @@ friction_derivs.py   ← physics primitives, smoothing matrix, IC setup
 adapt_fwd_solve.py   ← adaptive RK forward solver
                        • forward_solve_adaptive_2block (nominal only)
                        • forward_solve_adaptive_2block_sens (nominal + sensitivity)
-adjoint_solve.py     ← single-block adjoint (legacy)
+adjoint_solve.py     ← single-block continuous adjoint (legacy)
 compute_obj.py       ← J and dJ/dp via forward sensitivity
 landscape_worker.py  ← process-pool worker for J landscape scan
 ```
 
-## Usage
+The discrete-adjoint notebook is self-contained: it re-implements the two-block forward in JAX so AD can trace end-to-end, but still imports `setup_initial_conditions_2block` and `make_smoothing_matrix` from `friction_derivs.py`, and uses the numpy `forward_solve_adaptive_2block` as a sanity-check reference.
 
-Open `slip_adjoint_double_springslider.ipynb` in Jupyter. The notebook runs:
-1. Forward + sensitivity solve at the production T (with sensitivity time-series plots)
-2. Gradient validation: forward-sensitivity vs centred finite differences, all 4 parameters
-3. J landscape scan (optional gradient arrows)
-4. Inversion via `scipy.optimize.minimize` with the forward-sensitivity gradient
-5. Convergence plots and animated trajectory viewer
+## Notebooks
+
+- **`slip_discrete_adjoint_double_springslider.ipynb`** — two-block, discrete adjoint via JAX/Diffrax (current preferred). JAX rewrite of the model, Optimistix root-find for `V` in `log V`, `Dopri8` with `RecursiveCheckpointAdjoint`, AD-vs-FD step-size sweep, inversion via `trust-constr` and `basinhopping`.
+- **`slip_sensitivity_double_springslider.ipynb`** / **`slip_adjoint_double_springslider.ipynb`** — two-block, numpy forward-sensitivity path: gradient validation (FS vs FD), J landscape, inversion.
+- **`slip_adjoint_springslider_adapttime.ipynb`** — single-block (legacy, still uses the continuous adjoint).
+- **`visualize_objective.ipynb`** — objective function visualization.
 
 Edits to `.py` modules are picked up automatically via `%autoreload 2`.
 
@@ -69,3 +63,5 @@ Edits to `.py` modules are picked up automatically via `%autoreload 2`.
 ## Dependencies
 
 Python 3, NumPy, SciPy, Matplotlib, Jupyter (with ipywidgets for interactive plots), optional ffmpeg for saving animations.
+
+The discrete-adjoint notebook additionally requires `jax` (with `jax_enable_x64=True`), `diffrax`, and `optimistix`.

@@ -7,46 +7,48 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Gradient-based inversion of rate-and-state friction parameters for spring-slider models of afterslip. Two configurations are supported:
 
 - **Single-block**: invert for `a` (and optionally `k`). One spring couples the block to the loading plate. Still uses the continuous adjoint (legacy).
-- **Two-block (symmetric, Abe & Kato 2013)**: invert for any subset of `{a1, a2, k0, k12}`. Topology: `Plate ←(k0)→ Block 1 ←(k12)→ Block 2 ←(k0)→ Plate`. **Two-block now uses forward sensitivity** (Cao, Li, Petzold 2003), not the adjoint.
+- **Two-block (symmetric, Abe & Kato 2013)**: invert for any subset of `{a1, a2, k0, k12}`. Topology: `Plate ←(k0)→ Block 1 ←(k12)→ Block 2 ←(k0)→ Plate`. Two gradient methods are now supported:
+  1. **Forward sensitivity** (Cao, Li, Petzold 2003) — original numpy-based implementation.
+  2. **Discrete adjoint via AD** (JAX + Diffrax + Optimistix) — current preferred method. Backpropagates through the actual adaptive ODE stepper using `RecursiveCheckpointAdjoint`; scales independently of parameter count.
 
-The forward model integrates a DAE (force balance + two ODEs per block). For the two-block case, forward sensitivity equations `ds_x/dp = ∂x/∂p` are integrated alongside the nominal state on the same adaptive grid, and `dJ/dp` is computed from a single combined pass.
+The forward model integrates a DAE (force balance + two ODEs per block). The two-block forward-sensitivity path integrates `ds_x/dp = ∂x/∂p` alongside the nominal state on the same adaptive grid. The discrete-adjoint path eliminates `V` via a differentiable root-find (Optimistix Newton in `log V`) inside the ODE RHS and reverse-mode-differentiates through Diffrax's `Tsit5`/`Dopri8` stepper.
 
-## Why forward sensitivity (two-block)
+## Why not the continuous adjoint (two-block)
 
 The continuous adjoint with an adaptively-stepped forward solver became **dual-inconsistent** during fast slip events: the adjoint integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup (the explicit RK3 adjoint and a Radau adjoint agreed with each other but disagreed with FD by many orders of magnitude on long horizons). See Alexe & Sandu, *J. Comput. Appl. Math.* 233 (2009) for the general phenomenon.
 
-Forward sensitivity sidesteps this entirely:
-- integrated on the same adaptive grid as the nominal state (no separate interpolation),
-- no reverse-time integration through near-singular regions,
-- produces the *exact* gradient of the discretised `J` by construction.
+Both replacement methods sidestep this. They differ in scaling:
 
-With 4 parameters and 1 scalar output `J`, forward sensitivity costs ~5× a forward solve — well-justified.
+- **Forward sensitivity** integrates `s_x = ∂x/∂p` on the same adaptive grid as the nominal state. No reverse-time integration. Produces the exact gradient of the discretised `J`. Cost ≈ `(1 + n_params) ×` forward solve — fine for the 4-parameter problem.
+- **Discrete adjoint via AD** (JAX/Diffrax `RecursiveCheckpointAdjoint`) reverse-mode-differentiates through the actual time-stepping algorithm with logarithmic checkpointing. Cost ≈ `O(1) ×` forward solve regardless of parameter count, which matters once we want to invert for more than 4 parameters. Diffrax explicitly recommends it over `BacksolveAdjoint` (the continuous adjoint) for stiff/near-stiff systems — exactly the failure mode we hit.
 
 ## Running the code
 
 The primary workflow is through Jupyter notebooks:
-- `slip_adjoint_double_springslider.ipynb` — two-block: forward+sensitivity solve, gradient validation (FS vs FD), J landscape, inversion for `a1`/`a2`/`k0`/`k12` via forward sensitivity
-- `slip_adjoint_springslider_adapttime.ipynb` — single-block (legacy, still uses adjoint)
-- `adjoint_springslider.ipynb` — earlier single-block dev notebook
+- `slip_discrete_adjoint_double_springslider.ipynb` — **two-block, discrete adjoint via JAX/Diffrax AD** (current preferred path): JAX rewrite of the forward model, differentiable root-find for `V`, `RecursiveCheckpointAdjoint` backprop, gradient validation (AD vs FD step-size sweep), inversion via `scipy.optimize.minimize` / `basinhopping` with `jax.value_and_grad`.
+- `slip_sensitivity_double_springslider.ipynb` / `slip_adjoint_double_springslider.ipynb` — two-block, numpy forward-sensitivity path: gradient validation (FS vs FD), J landscape, inversion for `a1`/`a2`/`k0`/`k12`.
+- `slip_adjoint_springslider_adapttime.ipynb` — single-block (legacy, still uses continuous adjoint)
 - `visualize_objective.ipynb` — objective function visualization
 
-The Python modules use `%autoreload 2` in the notebooks.
+The Python modules use `%autoreload 2` in the notebooks. The discrete-adjoint notebook additionally requires `jax`, `diffrax`, and `optimistix` (with `jax_enable_x64=True`).
 
-No test runner. Gradient correctness is validated inline via FD checks in the notebooks. The key check: `rel_err = |fs_grad - fd_grad| / |fd_grad| < 5%`.
+No test runner. Gradient correctness is validated inline via FD checks in the notebooks. Targets: `rel_err < 5%` for the forward-sensitivity path (FD-limited), and `rel_err ≲ 1e-4` for the discrete-adjoint path with a centred-FD step-size sweep used to locate the FD noise/bias plateau.
 
 ## Module dependency order
 
 ```
-friction_derivs.py   ← physics primitives (no imports from project)
+friction_derivs.py   ← physics primitives, IC setup, smoothing matrix (no imports from project)
       ↓
-adapt_fwd_solve.py   ← adaptive RK forward solver (nominal + sensitivity)
+adapt_fwd_solve.py   ← adaptive RK forward solver (nominal + forward sensitivity)
       ↓
-adjoint_solve.py     ← single-block adjoint (legacy)
+adjoint_solve.py     ← single-block continuous adjoint (legacy)
       ↓
 compute_obj.py       ← J and dJ/dp (forward-sensitivity gradient for two-block)
 ```
 
 `landscape_worker.py` is a process-pool worker for the J-landscape scan; it uses the sensitivity solver when `COMPUTE_GRADIENT=True`.
+
+The **discrete-adjoint notebook is self-contained**: it re-implements the two-block forward model in JAX (rather than importing from `adapt_fwd_solve.py`) so AD can trace it end-to-end. It still imports `setup_initial_conditions_2block` and `make_smoothing_matrix` from `friction_derivs.py`, and uses `forward_solve_adaptive_2block` from `adapt_fwd_solve.py` only as a numpy reference for sanity-checking the JAX forward.
 
 ## Physics
 
@@ -126,14 +128,36 @@ For uniform grids the weights are constant and cancel, recovering the standard u
 
 Both `J` and `dJ/dp` are evaluated on a **fixed reference grid `t_ref`** (built once at the initial guess, uniform). Forward solutions and their sensitivities are interpolated from the native adaptive grid onto `t_ref` before assembling `J` and the gradient. This makes the computed gradient self-consistent with the `J` the optimiser sees, and FD vs forward-sensitivity gradients agree to within numerical noise.
 
+## Discrete adjoint via JAX/Diffrax (two-block)
+
+`slip_discrete_adjoint_double_springslider.ipynb` is the JAX/Diffrax rewrite. Key implementation choices:
+
+1. **Algebraic constraint** `tau(V,psi) + eta*V = rhs` is solved via `optimistix.Newton` in `log V` (log-space keeps Newton stable across the 12+ orders of magnitude `V` traverses through rupture). Optimistix is a differentiable implicit-layer library — AD propagates through the root-find via the implicit function theorem, so backprop "just works" and is taken at a genuine root.
+   - Initial guess from the friction-dominated approximation (ignoring `eta*V`): `logV0 = log(V0) - psi/a + rhs/(N*a)`. Lands within O(1) in log space.
+   - Tolerances `rtol=1e-12, atol=1e-13`; `throw=True` so silent non-convergence raises.
+2. **Vector field** is the 4-D ODE in `(u1, psi1, u2, psi2)` with `V_i` eliminated inside the RHS by `solve_V`. Diffrax sees only the ODE.
+3. **Time stepping**: `diffrax.Dopri8` (8th-order explicit RK with PI step-size control), `rtol=1e-11`, `atol=1e-13`, `max_steps=500_000`. The high-order solver shrinks the discretisation noise of `J(p)` (making FD a clean reference) and reduces the step-grid wobble backprop must propagate through. `Tsit5` also works; `Dopri8` is the current default.
+4. **Saving**: `SaveAt(ts=t_ref)` returns the state directly on the fixed reference grid `J` uses — no post-hoc interpolation needed.
+5. **Adjoint**: `diffrax.RecursiveCheckpointAdjoint()` — reverse-mode AD through the actual stepper with logarithmic checkpointing. Recommended over `BacksolveAdjoint` for stiff/near-stiff systems.
+6. **Objective**: `J_fn(p)` builds residuals `S @ u_i - Su_i_obs` and integrates `0.5 * (r1² + r2²)` via `jnp.trapezoid` on `t_ref`. `J_and_grad = jax.jit(jax.value_and_grad(J_fn))`.
+
+**Gradient validation cell** does a centred-FD sweep across `eps_rel ∈ logspace(-2, -10)` to locate the noise/bias plateau, then picks per-parameter best `eps` and reports `|AD - FD| / |FD|`. The plot of FD vs `eps` exposes the U-shape (truncation bias at large `eps`, round-off noise at small `eps`) directly.
+
+**`jax_enable_x64=True` is required** — double precision throughout; `arcsinh` arguments reach ~1e35 during rupture and float32 would be useless.
+
 ## Inversion setup
 
-**Two-block (`slip_adjoint_double_springslider.ipynb`):**
+**Two-block forward-sensitivity (`slip_adjoint_double_springslider.ipynb` / `slip_sensitivity_double_springslider.ipynb`):**
 - `INVERT_PARAMS` controls which subset of `['a1','a2','k0','k12']` is optimised.
 - `fun_and_grad(x_norm)` runs one `forward_solve_adaptive_2block_sens` per evaluation (sensitivities for exactly `INVERT_PARAMS`), then `compute_grad_forward_sens_2block` extracts the gradient.
+
+**Two-block discrete-adjoint (`slip_discrete_adjoint_double_springslider.ipynb`):**
+- Same `INVERT_PARAMS` convention. `fun_and_grad(x_norm)` calls the cached `J_and_grad(p_vec)` once per evaluation; the active-parameter gradient is sliced out of the full 4-component `jax.grad` result.
+- Optimiser: `scipy.optimize.minimize(method='trust-constr', jac=True, ...)` or `scipy.optimize.basinhopping` wrapping the same `trust-constr` local step for global search.
+
+**Shared conventions:**
 - Parameters are normalised by their initial values (`scales`) so all components are O(1) inside the optimiser.
-- Optimiser: `scipy.optimize.minimize` with `method='trust-constr'` (or `'L-BFGS-B'`), `jac=True`, physical bounds.
-- IC (`u*_0_inv`, `psi*_0_inv`) is built once from the initial guess `_M0` and frozen; `Mc = dict(M_true)` carries `tau0_*` through unchanged. This matches the frozen-IC convention the sensitivity equations are derived under. Recomputing IC per iterate would re-introduce an implicit `a`-dependence in `psi_ss(a)` and `tau0(a)` that the sensitivities (as derived) do not track, biasing the gradient.
+- IC (`u*_0_inv`, `psi*_0_inv`, `tau0_*`) is built once from the initial guess and frozen across iterates. This matches the frozen-IC convention the sensitivities are derived under, and is required for the JAX path too (closure captures `tau0_1`, `tau0_2`, `u1_0`, etc. as constants). Recomputing IC per iterate would re-introduce implicit `a`-dependence in `psi_ss(a)` and `tau0(a)` that neither the analytic sensitivities nor the JAX trace tracks, biasing the gradient.
 
 ## Known issues / pending work
 
