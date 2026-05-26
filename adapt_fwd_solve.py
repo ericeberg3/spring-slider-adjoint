@@ -242,7 +242,7 @@ def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
 def forward_solve_adaptive_2block_sens(M, T, u1_0, psi1_0, u2_0, psi2_0,
                                         params=('a1', 'a2', 'k0', 'k12'),
                                         V1_init=None, V2_init=None,
-                                        tol=5e-9, dt0=1.0, dtmax=1e5, safety=0.9):
+                                        tol=1e-9, dt0=1.0, dtmax=1e5, safety=0.9):
     """
     Adaptive-step forward solve augmented with forward sensitivity equations
     for parameters p in `params`.  Frozen-IC convention (s_x(0)=0) to match the

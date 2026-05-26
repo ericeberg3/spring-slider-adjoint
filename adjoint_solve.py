@@ -134,3 +134,233 @@ def adjoint_solve(fwd, t_obs, u_obs, M, sigma, fwd_interp=None, S=None, smooth_m
 
     return dict(t=fwd['t'], p=p, r=r, lam=lam)
 
+
+def adjoint_solve_2block(fwd, t_obs, u1_obs, u2_obs, M, sigma,
+                         S=None, smooth_misfit1=None, smooth_misfit2=None,
+                         use_implicit=False, implicit_rtol=1e-8, implicit_atol=1e-10):
+    """
+    Adjoint solver for the two-block symmetrically loaded spring-slider system.
+
+    Adjoint variables: pu1, r1 (=pps1) for Block 1; pu2, r2 (=pps2) for Block 2.
+    Lagrange multipliers:
+        lam1 = (pu1 + G_V1*r1) / (tau_V1 + eta)
+        lam2 = (pu2 + G_V2*r2) / (tau_V2 + eta)
+
+    Reversed-time RHS (dpu_i/dtau, dr_i/dtau):
+        dpu1 = -(k0+k12)*lam1 + k12*lam2 - sm1
+        dr1  = -tau_psi1*lam1 + G_psi1*r1
+        dpu2 = +k12*lam1 - (k0+k12)*lam2 - sm2
+        dr2  = -tau_psi2*lam2 + G_psi2*r2
+
+    Pass u1_obs=None or u2_obs=None to exclude that block from the misfit.
+    IC: all adjoint variables zero at t=T.
+
+    use_implicit: if True, dispatch to adjoint_solve_2block_implicit (Radau IIA)
+        instead of the explicit RK3 below. Use this when the adjoint blows up
+        on long horizons (stiff dissipative forward => anti-stable adjoint).
+    """
+    if use_implicit:
+        return adjoint_solve_2block_implicit(
+            fwd, t_obs, u1_obs, u2_obs, M, sigma,
+            S=S, smooth_misfit1=smooth_misfit1, smooth_misfit2=smooth_misfit2,
+            rtol=implicit_rtol, atol=implicit_atol,
+        )
+    k0, k12, eta = M['k0'], M['k12'], M['eta']
+    n = len(fwd['t'])
+
+    # --- smoothed misfit sources ---
+    def _build_sm(u_src, u_obs_arr):
+        if u_obs_arr is None:
+            return np.zeros(n)
+        u_obs_at_fwd = np.interp(fwd['t'], t_obs, u_obs_arr)
+        if sigma is None and S is None:
+            return u_src - u_obs_at_fwd
+        _S = S if S is not None else make_smoothing_matrix(fwd['t'], sigma)
+        return _S.T @ (_S @ u_src - _S @ u_obs_at_fwd)
+
+    if smooth_misfit1 is None:
+        smooth_misfit1 = _build_sm(fwd['u1'], u1_obs)
+    if smooth_misfit2 is None:
+        smooth_misfit2 = _build_sm(fwd['u2'], u2_obs)
+
+    # --- reverse all forward arrays ---
+    rev = slice(None, None, -1)
+    tV1_r = fwd['tau_V1'][rev];   tP1_r = fwd['tau_psi1'][rev]
+    GV1_r = fwd['G_V1'][rev];     GP1_r = fwd['G_psi1'][rev]
+    tV2_r = fwd['tau_V2'][rev];   tP2_r = fwd['tau_psi2'][rev]
+    GV2_r = fwd['G_V2'][rev];     GP2_r = fwd['G_psi2'][rev]
+    sm1_r = smooth_misfit1[rev];  sm2_r = smooth_misfit2[rev]
+    t_r   = fwd['t'][rev]
+
+    pu1_r = np.zeros(n); r1_r = np.zeros(n)
+    pu2_r = np.zeros(n); r2_r = np.zeros(n)
+
+    def _rhs(pu1, r1, pu2, r2, tV1, tP1, GV1, GP1, sm1,
+                               tV2, tP2, GV2, GP2, sm2):
+        lam1 = (pu1 + GV1 * r1) / (tV1 + eta)
+        lam2 = (pu2 + GV2 * r2) / (tV2 + eta)
+        dpu1 = -(k0 + k12) * lam1 + k12 * lam2 + sm1
+        dr1  = -tP1 * lam1 + GP1 * r1
+        dpu2 =  k12 * lam1 - (k0 + k12) * lam2 + sm2
+        dr2  = -tP2 * lam2 + GP2 * r2
+        return dpu1, dr1, dpu2, dr2
+
+    for j in range(n - 1):
+        dt_tau = t_r[j] - t_r[j + 1]   # > 0
+
+        pu1j, r1j = pu1_r[j], r1_r[j]
+        pu2j, r2j = pu2_r[j], r2_r[j]
+
+        # stage-1 (α=0)
+        c1 = (tV1_r[j], tP1_r[j], GV1_r[j], GP1_r[j], sm1_r[j],
+              tV2_r[j], tP2_r[j], GV2_r[j], GP2_r[j], sm2_r[j])
+        # stage-2 (α=½, linear interpolation)
+        c2 = (0.5*(tV1_r[j]+tV1_r[j+1]), 0.5*(tP1_r[j]+tP1_r[j+1]),
+              0.5*(GV1_r[j]+GV1_r[j+1]), 0.5*(GP1_r[j]+GP1_r[j+1]),
+              0.5*(sm1_r[j]+sm1_r[j+1]),
+              0.5*(tV2_r[j]+tV2_r[j+1]), 0.5*(tP2_r[j]+tP2_r[j+1]),
+              0.5*(GV2_r[j]+GV2_r[j+1]), 0.5*(GP2_r[j]+GP2_r[j+1]),
+              0.5*(sm2_r[j]+sm2_r[j+1]))
+        # stage-3 (α=1)
+        c3 = (tV1_r[j+1], tP1_r[j+1], GV1_r[j+1], GP1_r[j+1], sm1_r[j+1],
+              tV2_r[j+1], tP2_r[j+1], GV2_r[j+1], GP2_r[j+1], sm2_r[j+1])
+
+        dpu1_1, dr1_1, dpu2_1, dr2_1 = _rhs(pu1j, r1j, pu2j, r2j, *c1)
+
+        pu1_2 = pu1j + 0.5*dt_tau*dpu1_1; r1_2 = r1j + 0.5*dt_tau*dr1_1
+        pu2_2 = pu2j + 0.5*dt_tau*dpu2_1; r2_2 = r2j + 0.5*dt_tau*dr2_1
+        dpu1_2, dr1_2, dpu2_2, dr2_2 = _rhs(pu1_2, r1_2, pu2_2, r2_2, *c2)
+
+        pu1_3 = pu1j + dt_tau*(-dpu1_1+2.0*dpu1_2); r1_3 = r1j + dt_tau*(-dr1_1+2.0*dr1_2)
+        pu2_3 = pu2j + dt_tau*(-dpu2_1+2.0*dpu2_2); r2_3 = r2j + dt_tau*(-dr2_1+2.0*dr2_2)
+        dpu1_3, dr1_3, dpu2_3, dr2_3 = _rhs(pu1_3, r1_3, pu2_3, r2_3, *c3)
+
+        pu1_r[j+1] = pu1j + dt_tau/6.0*(dpu1_1 + 4.0*dpu1_2 + dpu1_3)
+        r1_r[j+1]  = r1j  + dt_tau/6.0*(dr1_1  + 4.0*dr1_2  + dr1_3)
+        pu2_r[j+1] = pu2j + dt_tau/6.0*(dpu2_1 + 4.0*dpu2_2 + dpu2_3)
+        r2_r[j+1]  = r2j  + dt_tau/6.0*(dr2_1  + 4.0*dr2_2  + dr2_3)
+
+    pu1 = pu1_r[rev]; r1 = r1_r[rev]
+    pu2 = pu2_r[rev]; r2 = r2_r[rev]
+
+    lam1 = (pu1 + fwd['G_V1'] * r1) / (fwd['tau_V1'] + eta)
+    lam2 = (pu2 + fwd['G_V2'] * r2) / (fwd['tau_V2'] + eta)
+
+    return dict(t=fwd['t'], pu1=pu1, r1=r1, lam1=lam1, pu2=pu2, r2=r2, lam2=lam2)
+
+
+def adjoint_solve_2block_implicit(fwd, t_obs, u1_obs, u2_obs, M, sigma,
+                                   S=None, smooth_misfit1=None, smooth_misfit2=None,
+                                   rtol=1e-8, atol=1e-10):
+    """
+    Stiff implicit two-block adjoint solver using scipy.integrate.solve_ivp
+    with method='Radau' (L-stable, 5th-order implicit Runge-Kutta).
+
+    Use this when the explicit RK3 adjoint blows up on long horizons. The
+    forward DAE is dissipative, so the adjoint is anti-stable backward in
+    time and grows like exp(T / t_relax). Radau handles those stiff modes
+    implicitly instead of trying to resolve them.
+
+    Integration is done in forward time t from t=T down to t=0
+    (solve_ivp accepts t_span with t_span[0] > t_span[1]). The forward-state
+    coefficients (tau_V*, tau_psi*, G_V*, G_psi*) and the misfit sources
+    are linearly interpolated from fwd['t'] inside the RHS. Output is
+    re-flipped to original (increasing) time order so it matches the
+    explicit solver's return contract.
+
+    Forward-time adjoint RHS (negation of the reversed-time RHS):
+        dpu1/dt = +(k0+k12)*lam1 - k12*lam2 - sm1
+        dr1 /dt = +tau_psi1*lam1 - G_psi1*r1
+        dpu2/dt = -k12*lam1 + (k0+k12)*lam2 - sm2
+        dr2 /dt = +tau_psi2*lam2 - G_psi2*r2
+    Terminal condition: pu1=r1=pu2=r2=0 at t=T.
+
+    Args mirror adjoint_solve_2block; rtol/atol set Radau tolerances.
+    """
+    k0, k12, eta = M['k0'], M['k12'], M['eta']
+    t_fwd = fwd['t']
+
+    # --- build misfit sources on forward grid (same convention as explicit) ---
+    n = len(t_fwd)
+    def _build_sm(u_src, u_obs_arr):
+        if u_obs_arr is None:
+            return np.zeros(n)
+        u_obs_at_fwd = np.interp(t_fwd, t_obs, u_obs_arr)
+        if sigma is None and S is None:
+            return u_src - u_obs_at_fwd
+        _S = S if S is not None else make_smoothing_matrix(t_fwd, sigma)
+        return _S.T @ (_S @ u_src - _S @ u_obs_at_fwd)
+
+    if smooth_misfit1 is None:
+        smooth_misfit1 = _build_sm(fwd['u1'], u1_obs)
+    if smooth_misfit2 is None:
+        smooth_misfit2 = _build_sm(fwd['u2'], u2_obs)
+
+    tV1, tP1, GV1, GP1 = fwd['tau_V1'], fwd['tau_psi1'], fwd['G_V1'], fwd['G_psi1']
+    tV2, tP2, GV2, GP2 = fwd['tau_V2'], fwd['tau_psi2'], fwd['G_V2'], fwd['G_psi2']
+
+    def _coeffs_at(t):
+        return (np.interp(t, t_fwd, tV1), np.interp(t, t_fwd, tP1),
+                np.interp(t, t_fwd, GV1), np.interp(t, t_fwd, GP1),
+                np.interp(t, t_fwd, smooth_misfit1),
+                np.interp(t, t_fwd, tV2), np.interp(t, t_fwd, tP2),
+                np.interp(t, t_fwd, GV2), np.interp(t, t_fwd, GP2),
+                np.interp(t, t_fwd, smooth_misfit2))
+
+    def rhs(t, y):
+        pu1_, r1_, pu2_, r2_ = y
+        tV1_, tP1_, GV1_, GP1_, sm1_, tV2_, tP2_, GV2_, GP2_, sm2_ = _coeffs_at(t)
+        D1, D2 = tV1_ + eta, tV2_ + eta
+        lam1 = (pu1_ + GV1_ * r1_) / D1
+        lam2 = (pu2_ + GV2_ * r2_) / D2
+        dpu1 =  (k0 + k12) * lam1 - k12 * lam2 - sm1_
+        dr1  =  tP1_ * lam1 - GP1_ * r1_
+        dpu2 = -k12 * lam1 + (k0 + k12) * lam2 - sm2_
+        dr2  =  tP2_ * lam2 - GP2_ * r2_
+        return [dpu1, dr1, dpu2, dr2]
+
+    def jac(t, _y):
+        # RHS is linear in y, so Jacobian depends only on the time-dependent
+        # forward-state coefficients (not on y itself). sm terms drop out too.
+        tV1_, tP1_, GV1_, GP1_, _, tV2_, tP2_, GV2_, GP2_, _ = _coeffs_at(t)
+        D1, D2 = tV1_ + eta, tV2_ + eta
+        # d(lam1)/d(pu1, r1) = (1/D1, GV1/D1);  d(lam2)/d(pu2, r2) = (1/D2, GV2/D2)
+        J = np.zeros((4, 4))
+        # row 0: dpu1/dt
+        J[0, 0] =  (k0 + k12) / D1
+        J[0, 1] =  (k0 + k12) * GV1_ / D1
+        J[0, 2] = -k12 / D2
+        J[0, 3] = -k12 * GV2_ / D2
+        # row 1: dr1/dt
+        J[1, 0] =  tP1_ / D1
+        J[1, 1] =  tP1_ * GV1_ / D1 - GP1_
+        # row 2: dpu2/dt
+        J[2, 0] = -k12 / D1
+        J[2, 1] = -k12 * GV1_ / D1
+        J[2, 2] =  (k0 + k12) / D2
+        J[2, 3] =  (k0 + k12) * GV2_ / D2
+        # row 3: dr2/dt
+        J[3, 2] =  tP2_ / D2
+        J[3, 3] =  tP2_ * GV2_ / D2 - GP2_
+        return J
+
+    y_T = np.zeros(4)
+    # Integrate backward in t: span (T, 0); t_eval must be sorted same direction.
+    t_eval_rev = t_fwd[::-1]
+    sol = solve_ivp(rhs, (t_fwd[-1], t_fwd[0]), y_T,
+                    method='Radau', jac=jac, t_eval=t_eval_rev,
+                    rtol=rtol, atol=atol)
+    if not sol.success:
+        raise RuntimeError(f"Radau adjoint failed: {sol.message}")
+
+    # sol.y is (4, n) at t_eval_rev (decreasing). Flip to increasing-t order.
+    pu1 = sol.y[0][::-1]
+    r1  = sol.y[1][::-1]
+    pu2 = sol.y[2][::-1]
+    r2  = sol.y[3][::-1]
+
+    lam1 = (pu1 + fwd['G_V1'] * r1) / (fwd['tau_V1'] + eta)
+    lam2 = (pu2 + fwd['G_V2'] * r2) / (fwd['tau_V2'] + eta)
+
+    return dict(t=t_fwd, pu1=pu1, r1=r1, lam1=lam1, pu2=pu2, r2=r2, lam2=lam2)
+

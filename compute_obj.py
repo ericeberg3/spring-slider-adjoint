@@ -57,6 +57,34 @@ def compute_J_2block(fwd, t_obs, u1_obs, u2_obs, sigma, t_ref, S=None):
     return J
 
 
+def compute_grad_a1(fwd, adj, M):
+    """dJ/da1 = int [ -lam1*(dtau1/da1) + r1*(dG1/da1) ] dt  (two-block adjoint)."""
+    integrand = adj['lam1'] * fwd['dtau_da1'] - adj['r1'] * fwd['dG_da1']
+    return np.trapz(-integrand, fwd['t'])
+
+
+def compute_grad_a2(fwd, adj, M):
+    """dJ/da2 = int [ -lam2*(dtau2/da2) + r2*(dG2/da2) ] dt  (two-block adjoint)."""
+    integrand = adj['lam2'] * fwd['dtau_da2'] - adj['r2'] * fwd['dG_da2']
+    return np.trapz(-integrand, fwd['t'])
+
+
+def compute_grad_k0(fwd, adj, M):
+    """dJ/dk0 = int [ -lam1*(u1 - V_bg*t) - lam2*(u2 - V_bg*t) ] dt  (two-block adjoint)."""
+    t = fwd['t']
+    return np.trapz(
+        -adj['lam1'] * (fwd['u1'] - M['V_bg'] * t)
+        - adj['lam2'] * (fwd['u2'] - M['V_bg'] * t),
+        t
+    )
+
+
+def compute_grad_k12(fwd, adj, M):
+    """dJ/dk12 = int [ (lam2 - lam1)*(u1 - u2) ] dt  (two-block adjoint)."""
+    del M  # k12 gradient has no explicit M dependence; M kept for API consistency
+    return np.trapz((adj['lam2'] - adj['lam1']) * (fwd['u1'] - fwd['u2']), fwd['t'])
+
+
 def compute_grad_forward_sens_2block(fwd_sens, t_obs, u1_obs, u2_obs, sigma, t_ref, S=None):
     """
     Gradients dJ/dp via forward sensitivity, using the same fixed-reference-grid
