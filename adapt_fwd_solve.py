@@ -1,5 +1,6 @@
 import numpy as np
 from friction_derivs import *
+from friction_derivs import block_M
 from adjoint_solve import *
 
 def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
