@@ -107,11 +107,12 @@ def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
       Block 1: tau1(V1,psi1) + eta*V1 + (k0+k12)*u1 - k12*u2 = tau0_1 + k0*V_bg*t
       Block 2: tau2(V2,psi2) + eta*V2 + (k0+k12)*u2 - k12*u1 = tau0_2 + k0*V_bg*t
 
-    M must contain:  a1, a2, k0, k12, tau0_1, tau0_2, eta, V_bg,
-                     and all shared friction params (f0, V0, b, dc, N).
+    M must contain:  a1, a2, k0, k12, tau0_1, tau0_2, eta, V_bg, V0.
+    Per-block friction parameters (a_i, N_i, b_i, dc_i, f0_i) are honoured when
+    present; otherwise the shared keys (a, N, b, dc, f0) are used as fallback.
     """
-    M1 = {**M, 'a': M['a1']}
-    M2 = {**M, 'a': M['a2']}
+    M1 = block_M(M, 1)
+    M2 = block_M(M, 2)
     k0, k12, eta = M['k0'], M['k12'], M['eta']
     tau_L1_fn = lambda t: M['tau0_1'] + k0 * M['V_bg'] * t
     tau_L2_fn = lambda t: M['tau0_2'] + k0 * M['V_bg'] * t
@@ -272,9 +273,12 @@ def forward_solve_adaptive_2block_sens(M, T, u1_0, psi1_0, u2_0, psi2_0,
 
     Returns the same dict as forward_solve_adaptive_2block, plus
         sens: dict[p, dict] with keys 's_u1','s_psi1','s_u2','s_psi2' (each array of length len(t)).
+
+    Per-block friction parameters (a_i, N_i, b_i, dc_i, f0_i) are honoured when
+    present in M; otherwise the shared keys are used as fallback via block_M.
     """
-    M1 = {**M, 'a': M['a1']}
-    M2 = {**M, 'a': M['a2']}
+    M1 = block_M(M, 1)
+    M2 = block_M(M, 2)
     k0, k12, eta = M['k0'], M['k12'], M['eta']
     V_bg = M['V_bg']
     tau_L1_fn = lambda t: M['tau0_1'] + k0 * V_bg * t

@@ -68,8 +68,12 @@ Block 1: tau1 + eta*V1 + (k0+k12)*u1 - k12*u2 = tau0_1 + k0*V_bg*t
 Block 2: tau2 + eta*V2 + (k0+k12)*u2 - k12*u1 = tau0_2 + k0*V_bg*t
 ```
 Both blocks are independently loaded by the plate via `k0`; `k12` is the coupling spring.
-**`M` keys:** `f0, V0, a1, a2, b, dc, N, eta, k0, k12, V_bg, tau0_1, tau0_2`
-`tau0_1` and `tau0_2` are computed by `setup_initial_conditions_2block(M)` in `friction_derivs.py`.
+
+**Per-block friction parameters.** Each block carries its own `a, N, b, dc, f0` — keys `a1/a2`, `N1/N2`, `b1/b2`, `dc1/dc2`, `f0_1/f0_2`. The helper `block_M(M, i)` (defined in `friction_derivs.py`, re-exported by `adapt_fwd_solve.py`) builds a per-block scalar dict by picking the suffixed key when present and falling back to the shared name (`a`, `N`, `b`, `dc`, `f0`) otherwise — so legacy callers that set only shared values keep working unchanged.
+
+**`M` keys:** shared — `V0, eta, k0, k12, V_bg, tau0_1, tau0_2`; per-block — `a1, a2, N1, N2, b1, b2, dc1, dc2, f0_1, f0_2` (or shared-name fallbacks). `tau0_1` and `tau0_2` are computed by `setup_initial_conditions_2block(M)` in `friction_derivs.py` from each block's own friction parameters.
+
+**Sensitivity/AD scope.** The forward-sensitivity equations are derived only for `{a1, a2, k0, k12}`; `N_i, b_i, dc_i, f0_i` are accommodated as configurable per-block constants but are not currently invertable through the numpy sensitivity path. The JAX/Diffrax discrete-adjoint path captures the per-block constants by closure — they are inputs to the differentiable forward but are not part of `p_vec`, so AD treats them as fixed. Adding them to `p_vec` would just require widening the closure-captured tuple.
 
 ## Numerical scheme
 

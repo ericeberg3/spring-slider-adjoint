@@ -111,24 +111,52 @@ def setup_initial_conditions(M):
     M['tau0'] = tau_fn(V_init, psi_ss, M) + M['eta'] * V_init
     return 0.0, psi_ss, V_init
 
+def block_M(M, i):
+    """Build a per-block scalar dict from the two-block M.
+
+    Maps per-block keys (a_i, N_i, b_i, dc_i, f0_i) onto the generic names
+    (a, N, b, dc, f0) that the single-block-style primitives consume, falling
+    back to the shared keys (a, N, b, dc, f0) when a per-block key is absent.
+    `i` is 1 or 2.
+
+    All other entries in M (V0, eta, V_bg, k0, k12, tau0_*, ...) are passed
+    through unchanged so callers can still read them from the returned dict.
+    """
+    suf = str(i)            # 'a1','b1','dc1','N1'
+    suf_us = '_' + suf      # 'f0_1','f0_2'
+    return {
+        **M,
+        'a':  M.get('a'  + suf,    M.get('a')),
+        'N':  M.get('N'  + suf,    M.get('N')),
+        'b':  M.get('b'  + suf,    M.get('b')),
+        'dc': M.get('dc' + suf,    M.get('dc')),
+        'f0': M.get('f0' + suf_us, M.get('f0')),
+    }
+
+
 def setup_initial_conditions_2block(M, V1_init=1.0e-12, V2_init=1.0e-12):
     """
     Set initial conditions for the two-block coupled system.
 
-    Both blocks start at steady-state psi_ss (evaluated with their respective a_i),
-    with user-supplied post-seismic velocities V1_init, V2_init.  tau0_1 and tau0_2
-    are derived from the force-balance at t=0 (u1=u2=0) and stored in M.
+    Both blocks start at steady-state psi_ss (evaluated with their respective
+    per-block friction parameters), with user-supplied post-seismic velocities
+    V1_init, V2_init.  tau0_1 and tau0_2 are derived from the force-balance at
+    t=0 (u1=u2=0) and stored in M.
+
+    Per-block parameter keys (a_i, N_i, b_i, dc_i, f0_i) are honoured when
+    present; missing ones fall back to the shared keys (a, N, b, dc, f0) via
+    `block_M`.
 
     Returns (u1_0, psi1_ss, V1_init, u2_0, psi2_ss, V2_init).
     """
-    M1 = {**M, 'a': M['a1']}
-    M2 = {**M, 'a': M['a2']}
+    M1 = block_M(M, 1)
+    M2 = block_M(M, 2)
 
     fss_bg1 = fss_fn(M['V_bg'], M1)
-    psi1_ss = M['a1'] * np.log(2.0 * M['V0'] / M['V_bg'] * np.sinh(fss_bg1 / M['a1']))
+    psi1_ss = M1['a'] * np.log(2.0 * M['V0'] / M['V_bg'] * np.sinh(fss_bg1 / M1['a']))
 
     fss_bg2 = fss_fn(M['V_bg'], M2)
-    psi2_ss = M['a2'] * np.log(2.0 * M['V0'] / M['V_bg'] * np.sinh(fss_bg2 / M['a2']))
+    psi2_ss = M2['a'] * np.log(2.0 * M['V0'] / M['V_bg'] * np.sinh(fss_bg2 / M2['a']))
 
     M['tau0_1'] = tau_fn(V1_init, psi1_ss, M1) + M['eta'] * V1_init
     M['tau0_2'] = tau_fn(V2_init, psi2_ss, M2) + M['eta'] * V2_init
