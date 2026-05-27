@@ -192,6 +192,25 @@ def adjoint_solve_2block(fwd, t_obs, u1_obs, u2_obs, M, sigma,
     sm1_r = smooth_misfit1[rev];  sm2_r = smooth_misfit2[rev]
     t_r   = fwd['t'][rev]
 
+    # If the forward solver emitted per-step RK stage Jacobians, use them at
+    # alpha in {0, 1/2, 1} of each adjoint step instead of linearly
+    # interpolating accepted-endpoint Jacobians. Mapping: adjoint reversed
+    # step j corresponds to forward step j_fwd = (n-2)-j; reversing the
+    # (n_steps, 3) stage arrays on axis 0 with [::-1] makes s_*[j] == the
+    # stage row for forward step j_fwd. Adjoint stage 1 (alpha=0) sits at the
+    # later forward time (Heun-end => stage col 2), stage 2 (alpha=1/2) at
+    # mid (col 1), stage 3 (alpha=1) at the earlier forward time (col 0).
+    use_stages = 'stage_tau_V1' in fwd
+    if use_stages:
+        s_tV1 = fwd['stage_tau_V1'][::-1]
+        s_tP1 = fwd['stage_tau_psi1'][::-1]
+        s_GV1 = fwd['stage_G_V1'][::-1]
+        s_GP1 = fwd['stage_G_psi1'][::-1]
+        s_tV2 = fwd['stage_tau_V2'][::-1]
+        s_tP2 = fwd['stage_tau_psi2'][::-1]
+        s_GV2 = fwd['stage_G_V2'][::-1]
+        s_GP2 = fwd['stage_G_psi2'][::-1]
+
     pu1_r = np.zeros(n); r1_r = np.zeros(n)
     pu2_r = np.zeros(n); r2_r = np.zeros(n)
 
@@ -211,19 +230,33 @@ def adjoint_solve_2block(fwd, t_obs, u1_obs, u2_obs, M, sigma,
         pu1j, r1j = pu1_r[j], r1_r[j]
         pu2j, r2j = pu2_r[j], r2_r[j]
 
-        # stage-1 (α=0)
-        c1 = (tV1_r[j], tP1_r[j], GV1_r[j], GP1_r[j], sm1_r[j],
-              tV2_r[j], tP2_r[j], GV2_r[j], GP2_r[j], sm2_r[j])
-        # stage-2 (α=½, linear interpolation)
-        c2 = (0.5*(tV1_r[j]+tV1_r[j+1]), 0.5*(tP1_r[j]+tP1_r[j+1]),
-              0.5*(GV1_r[j]+GV1_r[j+1]), 0.5*(GP1_r[j]+GP1_r[j+1]),
-              0.5*(sm1_r[j]+sm1_r[j+1]),
-              0.5*(tV2_r[j]+tV2_r[j+1]), 0.5*(tP2_r[j]+tP2_r[j+1]),
-              0.5*(GV2_r[j]+GV2_r[j+1]), 0.5*(GP2_r[j]+GP2_r[j+1]),
-              0.5*(sm2_r[j]+sm2_r[j+1]))
-        # stage-3 (α=1)
-        c3 = (tV1_r[j+1], tP1_r[j+1], GV1_r[j+1], GP1_r[j+1], sm1_r[j+1],
-              tV2_r[j+1], tP2_r[j+1], GV2_r[j+1], GP2_r[j+1], sm2_r[j+1])
+        if use_stages:
+            # Stage Jacobians from the actual forward RK3 stage states.
+            # sm (smoothed misfit) remains linearly interpolated because it
+            # carries observation data sampled on fwd['t'].
+            # stage cols: 0=alpha=0 (forward start, later t in reversed time
+            # => adjoint stage 3); 1=alpha=1/2 (mid); 2=alpha=1 (forward
+            # Heun-end, earlier t in reversed time => adjoint stage 1).
+            c1 = (s_tV1[j, 2], s_tP1[j, 2], s_GV1[j, 2], s_GP1[j, 2], sm1_r[j],
+                  s_tV2[j, 2], s_tP2[j, 2], s_GV2[j, 2], s_GP2[j, 2], sm2_r[j])
+            c2 = (s_tV1[j, 1], s_tP1[j, 1], s_GV1[j, 1], s_GP1[j, 1],
+                  0.5*(sm1_r[j]+sm1_r[j+1]),
+                  s_tV2[j, 1], s_tP2[j, 1], s_GV2[j, 1], s_GP2[j, 1],
+                  0.5*(sm2_r[j]+sm2_r[j+1]))
+            c3 = (s_tV1[j, 0], s_tP1[j, 0], s_GV1[j, 0], s_GP1[j, 0], sm1_r[j+1],
+                  s_tV2[j, 0], s_tP2[j, 0], s_GV2[j, 0], s_GP2[j, 0], sm2_r[j+1])
+        else:
+            # Legacy path: linear interpolation of accepted-endpoint Jacobians.
+            c1 = (tV1_r[j], tP1_r[j], GV1_r[j], GP1_r[j], sm1_r[j],
+                  tV2_r[j], tP2_r[j], GV2_r[j], GP2_r[j], sm2_r[j])
+            c2 = (0.5*(tV1_r[j]+tV1_r[j+1]), 0.5*(tP1_r[j]+tP1_r[j+1]),
+                  0.5*(GV1_r[j]+GV1_r[j+1]), 0.5*(GP1_r[j]+GP1_r[j+1]),
+                  0.5*(sm1_r[j]+sm1_r[j+1]),
+                  0.5*(tV2_r[j]+tV2_r[j+1]), 0.5*(tP2_r[j]+tP2_r[j+1]),
+                  0.5*(GV2_r[j]+GV2_r[j+1]), 0.5*(GP2_r[j]+GP2_r[j+1]),
+                  0.5*(sm2_r[j]+sm2_r[j+1]))
+            c3 = (tV1_r[j+1], tP1_r[j+1], GV1_r[j+1], GP1_r[j+1], sm1_r[j+1],
+                  tV2_r[j+1], tP2_r[j+1], GV2_r[j+1], GP2_r[j+1], sm2_r[j+1])
 
         dpu1_1, dr1_1, dpu2_1, dr2_1 = _rhs(pu1j, r1j, pu2j, r2j, *c1)
 
@@ -296,15 +329,41 @@ def adjoint_solve_2block_implicit(fwd, t_obs, u1_obs, u2_obs, M, sigma,
     if smooth_misfit2 is None:
         smooth_misfit2 = _build_sm(fwd['u2'], u2_obs)
 
-    tV1, tP1, GV1, GP1 = fwd['tau_V1'], fwd['tau_psi1'], fwd['G_V1'], fwd['G_psi1']
-    tV2, tP2, GV2, GP2 = fwd['tau_V2'], fwd['tau_psi2'], fwd['G_V2'], fwd['G_psi2']
+    # When per-step RK stage data is available, interleave the accepted-grid
+    # Jacobians with the forward solver's stage-2 (alpha=1/2) Jacobians so
+    # np.interp samples real stage values at midpoints instead of linearly
+    # interpolating across whole forward steps. sm stays on the accepted grid
+    # because it depends on observation interpolation + the S smoothing
+    # matrix built on fwd['t'].
+    if 'stage_t' in fwd:
+        n_aug   = 2 * n - 1
+        t_jac   = np.empty(n_aug)
+        t_jac[0::2] = t_fwd
+        t_jac[1::2] = fwd['stage_t'][:, 1]
+        def _interleave(arr, mid):
+            out = np.empty(n_aug)
+            out[0::2] = arr
+            out[1::2] = mid
+            return out
+        tV1 = _interleave(fwd['tau_V1'],   fwd['stage_tau_V1'][:, 1])
+        tP1 = _interleave(fwd['tau_psi1'], fwd['stage_tau_psi1'][:, 1])
+        GV1 = _interleave(fwd['G_V1'],     fwd['stage_G_V1'][:, 1])
+        GP1 = _interleave(fwd['G_psi1'],   fwd['stage_G_psi1'][:, 1])
+        tV2 = _interleave(fwd['tau_V2'],   fwd['stage_tau_V2'][:, 1])
+        tP2 = _interleave(fwd['tau_psi2'], fwd['stage_tau_psi2'][:, 1])
+        GV2 = _interleave(fwd['G_V2'],     fwd['stage_G_V2'][:, 1])
+        GP2 = _interleave(fwd['G_psi2'],   fwd['stage_G_psi2'][:, 1])
+    else:
+        t_jac = t_fwd
+        tV1, tP1, GV1, GP1 = fwd['tau_V1'], fwd['tau_psi1'], fwd['G_V1'], fwd['G_psi1']
+        tV2, tP2, GV2, GP2 = fwd['tau_V2'], fwd['tau_psi2'], fwd['G_V2'], fwd['G_psi2']
 
     def _coeffs_at(t):
-        return (np.interp(t, t_fwd, tV1), np.interp(t, t_fwd, tP1),
-                np.interp(t, t_fwd, GV1), np.interp(t, t_fwd, GP1),
+        return (np.interp(t, t_jac, tV1), np.interp(t, t_jac, tP1),
+                np.interp(t, t_jac, GV1), np.interp(t, t_jac, GP1),
                 np.interp(t, t_fwd, smooth_misfit1),
-                np.interp(t, t_fwd, tV2), np.interp(t, t_fwd, tP2),
-                np.interp(t, t_fwd, GV2), np.interp(t, t_fwd, GP2),
+                np.interp(t, t_jac, tV2), np.interp(t, t_jac, tP2),
+                np.interp(t, t_jac, GV2), np.interp(t, t_jac, GP2),
                 np.interp(t, t_fwd, smooth_misfit2))
 
     def rhs(t, y):

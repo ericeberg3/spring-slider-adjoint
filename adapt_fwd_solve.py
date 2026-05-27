@@ -98,7 +98,7 @@ def forward_solve_adaptive(M, T, u0, psi0, V_init=None,
 
 def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
                                   V1_init=None, V2_init=None,
-                                  tol=1e-6, dt0=1.0, dtmax=1e5, safety=0.9):
+                                  tol=1e-8, dt0=1.0, dtmax=1e5, safety=0.9):
     """
     Adaptive-step forward solve for two symmetrically loaded spring-sliders.
 
@@ -167,6 +167,20 @@ def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
     tV2_arr=[j[6]]; tP2_arr=[j[7]]; GV2_arr=[j[8]]; GP2_arr=[j[9]]
     da2_arr=[j[10]]; dGa2_arr=[j[11]]
 
+    # Per-step RK stage storage (filled once per accepted step). Indexing
+    # convention: stage_*[j, s] is stage s of the step that maps accepted
+    # state j -> j+1. Stage 0 == accepted state j; stage 2 lives at
+    # accepted-state j+1's TIME but uses the RK-Heun extrapolated state
+    # (not the 3rd-order accepted state).
+    dt_steps   = []
+    st_t       = []   # (n_steps, 3) once stacked
+    st_u1=[];  st_psi1=[];  st_V1=[]
+    st_u2=[];  st_psi2=[];  st_V2=[]
+    st_tV1=[]; st_tP1=[];   st_GV1=[]; st_GP1=[]
+    st_da1=[]; st_dGa1=[]
+    st_tV2=[]; st_tP2=[];   st_GV2=[]; st_GP2=[]
+    st_da2=[]; st_dGa2=[]
+
     t  = 0.0
     u1 = u1_0; psi1 = psi1_0
     u2 = u2_0; psi2 = psi2_0
@@ -202,6 +216,52 @@ def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
                      (u2_2-u2_3)**2 + (psi2_2-psi2_3)**2)
 
         if er < tol:
+            # ---- capture per-step stage data BEFORE advancing state ----
+            # Stage 1: at the accepted state (t, u1, psi1, u2, psi2);
+            # V comes from cached k1_rhs/k2_rhs.
+            s1_t = t
+            s1_u1, s1_psi1, s1_V1 = u1, psi1, k1_rhs
+            s1_u2, s1_psi2, s1_V2 = u2, psi2, k2_rhs
+            j_s1 = _jac(s1_V1, s1_psi1, s1_V2, s1_psi2)
+            # Stage 2: at the RK mid-stage state, t + 0.5*dt.
+            s2_t   = t + 0.5*dt
+            s2_u1  = u1   + 0.5*dt*k1_rhs
+            s2_psi1= psi1 + 0.5*dt*G1_rhs
+            s2_u2  = u2   + 0.5*dt*k2_rhs
+            s2_psi2= psi2 + 0.5*dt*G2_rhs
+            s2_V1, s2_V2 = k1_2, k2_2      # _rhs returns V at that state
+            j_s2 = _jac(s2_V1, s2_psi1, s2_V2, s2_psi2)
+            # Stage 3: at the RK-Heun extrapolated end state, t + dt.
+            # (NOT the 3rd-order accepted state used below.)
+            s3_t   = t + dt
+            s3_u1  = u1   + dt*(-k1_rhs + 2.0*k1_2)
+            s3_psi1= psi1 + dt*(-G1_rhs + 2.0*G1_2)
+            s3_u2  = u2   + dt*(-k2_rhs + 2.0*k2_2)
+            s3_psi2= psi2 + dt*(-G2_rhs + 2.0*G2_2)
+            s3_V1, s3_V2 = k1_3, k2_3
+            j_s3 = _jac(s3_V1, s3_psi1, s3_V2, s3_psi2)
+
+            dt_steps.append(dt)
+            st_t.append((s1_t, s2_t, s3_t))
+            st_u1.append((s1_u1, s2_u1, s3_u1))
+            st_psi1.append((s1_psi1, s2_psi1, s3_psi1))
+            st_V1.append((s1_V1, s2_V1, s3_V1))
+            st_u2.append((s1_u2, s2_u2, s3_u2))
+            st_psi2.append((s1_psi2, s2_psi2, s3_psi2))
+            st_V2.append((s1_V2, s2_V2, s3_V2))
+            st_tV1.append((j_s1[0], j_s2[0], j_s3[0]))
+            st_tP1.append((j_s1[1], j_s2[1], j_s3[1]))
+            st_GV1.append((j_s1[2], j_s2[2], j_s3[2]))
+            st_GP1.append((j_s1[3], j_s2[3], j_s3[3]))
+            st_da1.append((j_s1[4], j_s2[4], j_s3[4]))
+            st_dGa1.append((j_s1[5], j_s2[5], j_s3[5]))
+            st_tV2.append((j_s1[6], j_s2[6], j_s3[6]))
+            st_tP2.append((j_s1[7], j_s2[7], j_s3[7]))
+            st_GV2.append((j_s1[8], j_s2[8], j_s3[8]))
+            st_GP2.append((j_s1[9], j_s2[9], j_s3[9]))
+            st_da2.append((j_s1[10], j_s2[10], j_s3[10]))
+            st_dGa2.append((j_s1[11], j_s2[11], j_s3[11]))
+
             t += dt
             u1 = u1_3; psi1 = psi1_3
             u2 = u2_3; psi2 = psi2_3
@@ -238,6 +298,22 @@ def forward_solve_adaptive_2block(M, T, u1_0, psi1_0, u2_0, psi2_0,
         tau_V2   = np.array(tV2_arr), tau_psi2 = np.array(tP2_arr),
         G_V2     = np.array(GV2_arr), G_psi2   = np.array(GP2_arr),
         dtau_da2 = np.array(da2_arr), dG_da2   = np.array(dGa2_arr),
+        # Per-step Bogacki-Shampine RK3 stage data, shape (n_steps, 3).
+        # Stage indices: 0=alpha=0 (start), 1=alpha=1/2 (mid), 2=alpha=1 (Heun-end).
+        # Lets the adjoint use the actual stage Jacobians instead of linearly
+        # interpolating accepted-endpoint Jacobians at alpha=1/2.
+        dt_arr        = np.array(dt_steps),
+        stage_t       = np.array(st_t),
+        stage_u1      = np.array(st_u1),     stage_psi1   = np.array(st_psi1),
+        stage_V1      = np.array(st_V1),
+        stage_u2      = np.array(st_u2),     stage_psi2   = np.array(st_psi2),
+        stage_V2      = np.array(st_V2),
+        stage_tau_V1  = np.array(st_tV1),    stage_tau_psi1 = np.array(st_tP1),
+        stage_G_V1    = np.array(st_GV1),    stage_G_psi1   = np.array(st_GP1),
+        stage_dtau_da1= np.array(st_da1),    stage_dG_da1   = np.array(st_dGa1),
+        stage_tau_V2  = np.array(st_tV2),    stage_tau_psi2 = np.array(st_tP2),
+        stage_G_V2    = np.array(st_GV2),    stage_G_psi2   = np.array(st_GP2),
+        stage_dtau_da2= np.array(st_da2),    stage_dG_da2   = np.array(st_dGa2),
     )
 
 
