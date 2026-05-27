@@ -48,6 +48,8 @@ compute_obj.py       ← J and dJ/dp (forward-sensitivity gradient for two-block
 
 `landscape_worker.py` is a process-pool worker for the J-landscape scan; it uses the sensitivity solver when `COMPUTE_GRADIENT=True`.
 
+`adjoint_tests.py` holds the two test/diagnostic drivers used by `slip_adjoint_double_springslider.ipynb`: `validate_gradient_vs_fd(...)` (adjoint vs centred-FD, optional Forward-Euler and implicit Radau comparisons) and `run_J_landscape(...)` (per-parameter scan with four smoothing cases and optional adjoint-gradient arrows, dispatching to `landscape_worker.evaluate_landscape_point`). Pulled out of the notebook to keep it focused on the inversion workflow.
+
 The **discrete-adjoint notebook is self-contained**: it re-implements the two-block forward model in JAX (rather than importing from `adapt_fwd_solve.py`) so AD can trace it end-to-end. It still imports `setup_initial_conditions_2block` and `make_smoothing_matrix` from `friction_derivs.py`, and uses `forward_solve_adaptive_2block` from `adapt_fwd_solve.py` only as a numpy reference for sanity-checking the JAX forward.
 
 ## Physics

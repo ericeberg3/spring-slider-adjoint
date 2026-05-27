@@ -35,6 +35,8 @@ adapt_fwd_solve.py   ← adaptive RK forward solver
 adjoint_solve.py     ← single-block continuous adjoint (legacy)
 compute_obj.py       ← J and dJ/dp via forward sensitivity
 landscape_worker.py  ← process-pool worker for J landscape scan
+adjoint_tests.py     ← FD gradient validation + J landscape driver
+                       (called from slip_adjoint_double_springslider.ipynb)
 ```
 
 The discrete-adjoint notebook is self-contained: it re-implements the two-block forward in JAX so AD can trace end-to-end, but still imports `setup_initial_conditions_2block` and `make_smoothing_matrix` from `friction_derivs.py`, and uses the numpy `forward_solve_adaptive_2block` as a sanity-check reference.
