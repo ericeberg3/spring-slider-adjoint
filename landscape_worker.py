@@ -2,10 +2,6 @@
 
 Lives in a real module (rather than a notebook cell) so it can be imported
 by `concurrent.futures.ProcessPoolExecutor` workers via pickle reference.
-
-Gradients are computed via forward sensitivity (Cao, Li, Petzold 2003),
-which avoids the dual-inconsistency issues that the adaptively-stepped
-continuous adjoint hits when forward trajectories contain fast slip events.
 """
 import sys
 import time
@@ -19,11 +15,7 @@ def init_worker(project_dir):
         sys.path.insert(0, project_dir)
 
 from friction_derivs import setup_initial_conditions_2block
-from adapt_fwd_solve import (
-    forward_solve_adaptive_2block,
-    forward_solve_adaptive_2block_sens,
-)
-from compute_obj import compute_grad_forward_sens_2block
+from adapt_fwd_solve import forward_solve_adaptive_2block
 
 
 def _smooth_apply(t, sigma, u, chunk=512):
@@ -70,8 +62,12 @@ def _eval_J_on_tref(fwd, u1_obs_ref, u2_obs_ref, t_ref, S_fixed):
 def evaluate_landscape_point(p_val, scan_param, M_true, T,
                               V1_init, V2_init, u_const,
                               t_obs, u1_obs, u2_obs,
-                              sigmas, compute_gradient):
-    """Forward-solve at one parameter value; return J (and grad) per sigma.
+                              sigmas, compute_gradient=False):
+    """Forward-solve at one parameter value; return J per sigma.
+
+    `compute_gradient` is accepted for call-site compatibility with the
+    adjoint notebook but is a no-op — the forward-sensitivity gradient path
+    was removed. If True, a ValueError is raised.
 
     Two forward solves are run when scan_param is a1/a2:
       - fwd_true: IC recomputed for the scanned a-value (per-point IC).  Used
@@ -79,15 +75,15 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
       - fwd_fix:  IC frozen at `u_const` (the initial-guess IC used by the
         inversion's fun_and_grad). Used for the inversion-style entries.
 
-    When `compute_gradient` is True the run is upgraded to the sensitivity
-    solver, which adds ~5x cost per parameter.  Gradients are evaluated only
-    for the inversion-style sigma entries (the ones with a fixed t_ref) so
-    they're directly comparable to the optimizer's dJ/dp.
-
     `sigmas` is a list of entries:
         (label, sigma)                          — native-grid Gaussian smoothing
         (label, sigma, t_ref, S_fixed)          — inversion-style J on fixed grid
     """
+    if compute_gradient:
+        raise ValueError(
+            "compute_gradient=True is no longer supported: the forward-"
+            "sensitivity gradient path was removed.")
+
     t_start = time.perf_counter()
     Mc = dict(M_true)
     Mc[scan_param] = p_val
@@ -107,23 +103,20 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
         return {'p_val':   p_val,
                 'error':   str(e),
                 'J':       [np.nan] * len(sigmas),
-                'grad':    [np.nan] * len(sigmas),
                 'n_steps': 0,
                 't_fwd':   time.perf_counter() - t_fwd0,
-                't_adj':   0.0,
                 't_total': time.perf_counter() - t_start}
     t_fwd = time.perf_counter() - t_fwd0
 
     u1_on = np.interp(fwd['t'], t_obs, u1_obs)
     u2_on = np.interp(fwd['t'], t_obs, u2_obs)
 
-    # Lazily build the fixed-IC forward solve (with sensitivities when needed),
-    # only if an inversion-style sigma asks for it.
+    # Lazily build the fixed-IC forward solve, only if an inversion-style
+    # sigma asks for it.
     fwd_fix = None
-    fwd_fix_sens = None  # populated when compute_gradient is True
 
     def _ensure_fwd_fix():
-        nonlocal fwd_fix, fwd_fix_sens
+        nonlocal fwd_fix
         if fwd_fix is not None:
             return
         if scan_param in ('a1', 'a2'):
@@ -133,22 +126,14 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
         else:
             u1_0_fix, psi1_0_fix, u2_0_fix, psi2_0_fix = u_const
 
-        if compute_gradient:
-            fwd_fix_sens = forward_solve_adaptive_2block_sens(
-                Mc, T, u1_0_fix, psi1_0_fix, u2_0_fix, psi2_0_fix,
-                params=(scan_param,),
-                V1_init=None, V2_init=None)
-            fwd_fix = fwd_fix_sens  # has u1/u2/psi1/psi2/t as well
-        else:
-            fwd_fix = forward_solve_adaptive_2block(
-                Mc, T, u1_0_fix, psi1_0_fix, u2_0_fix, psi2_0_fix,
-                V1_init=None, V2_init=None)
+        fwd_fix = forward_solve_adaptive_2block(
+            Mc, T, u1_0_fix, psi1_0_fix, u2_0_fix, psi2_0_fix,
+            V1_init=None, V2_init=None)
 
         if scan_param in ('a1', 'a2'):
             Mc['tau0_1'], Mc['tau0_2'] = tau0_1_true, tau0_2_true
 
-    Js, grads = [], []
-    t_grad0 = time.perf_counter()
+    Js = []
     for entry in sigmas:
         if len(entry) == 2:
             _, sigma = entry
@@ -164,23 +149,12 @@ def evaluate_landscape_point(p_val, scan_param, M_true, T,
             u2_obs_ref_e = np.interp(t_ref_e, t_obs, u2_obs)
             Js.append(_eval_J_on_tref(fwd_fix, u1_obs_ref_e, u2_obs_ref_e,
                                       t_ref_e, S_fixed_e))
-            if compute_gradient and fwd_fix_sens is not None:
-                grad_dict = compute_grad_forward_sens_2block(
-                    fwd_fix_sens, t_obs, u1_obs, u2_obs,
-                    sigma=sigma, t_ref=t_ref_e, S=S_fixed_e)
-                grads.append(grad_dict[scan_param])
-            else:
-                grads.append(np.nan)
         else:
             Js.append(_eval_J(fwd, u1_on, u2_on, sigma))
-            grads.append(np.nan)
-    t_grad = time.perf_counter() - t_grad0
 
     return {'p_val':   p_val,
             'error':   None,
             'J':       Js,
-            'grad':    grads,
             'n_steps': len(fwd['t']),
             't_fwd':   t_fwd,
-            't_adj':   t_grad,   # kept name for compat with existing diagnostic
             't_total': time.perf_counter() - t_start}

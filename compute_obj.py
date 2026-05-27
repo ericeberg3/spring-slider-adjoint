@@ -85,47 +85,6 @@ def compute_grad_k12(fwd, adj, M):
     return np.trapz((adj['lam2'] - adj['lam1']) * (fwd['u1'] - fwd['u2']), fwd['t'])
 
 
-def compute_grad_forward_sens_2block(fwd_sens, t_obs, u1_obs, u2_obs, sigma, t_ref, S=None):
-    """
-    Gradients dJ/dp via forward sensitivity, using the same fixed-reference-grid
-    convention as compute_J_2block (frozen S on t_ref; trapz integration on t_ref).
-
-    For a parameter p,
-        dJ/dp = sum_{i=1,2} int_{t_ref} (S u_i - S u_{i,obs})*(S * ds_i/dp_ref) dt_ref
-    with s_i(t_fwd) interpolated onto t_ref the same way as u_i.
-
-    Returns dict[p -> dJ/dp].
-    """
-    if S is None:
-        S = make_smoothing_matrix(t_ref, sigma)
-
-    t_fwd = fwd_sens['t']
-
-    # Precompute residuals (block-wise) on the reference grid
-    residuals = {}
-    for idx, (u_native, u_obs_arr) in enumerate(
-            ((fwd_sens['u1'], u1_obs), (fwd_sens['u2'], u2_obs)), start=1):
-        if u_obs_arr is None:
-            residuals[idx] = None
-            continue
-        u_ref     = np.interp(t_ref, t_fwd, u_native)
-        u_obs_ref = np.interp(t_ref, t_obs, u_obs_arr)
-        residuals[idx] = S @ u_ref - S @ u_obs_ref
-
-    grads = {}
-    for p, sens in fwd_sens['sens'].items():
-        g = 0.0
-        for idx in (1, 2):
-            if residuals[idx] is None:
-                continue
-            s_u_native = sens[f's_u{idx}']
-            s_u_ref    = np.interp(t_ref, t_fwd, s_u_native)
-            g += np.trapz(residuals[idx] * (S @ s_u_ref), t_ref)
-        grads[p] = g
-
-    return grads
-
-
 def trapz_weights(t):
     w = np.zeros(len(t)); w[:-1] += np.diff(t); w[1:] += np.diff(t)
     return 0.5 * w
