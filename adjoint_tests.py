@@ -920,3 +920,246 @@ def run_J_landscape_jax(M_true, T,
         }
 
     return results
+
+
+# ======================================================================
+# 2D objective-function landscape (JAX vmap-parallelised)
+# ======================================================================
+def run_J_landscape_2d_jax(M, T,
+                           forward_solve_jax,
+                           u1_obs, u2_obs,
+                           t_ref=None,
+                           params=('a1', 'a2'),
+                           n1=30, n2=30,
+                           sigma=None,
+                           p1_range=None, p2_range=None,
+                           chunk_size=None,
+                           n_save=1000,
+                           view_init=(30, -60),
+                           save_dir='Figures'):
+    """3D surface scan of log10(J) over two parameters, batched-parallel via
+    `jax.vmap` through the Diffrax discrete-adjoint stack.
+
+    Each chunk of the parameter grid is dispatched as one vmap'd XLA
+    computation. XLA parallelises the batch internally across CPU threads (or
+    SIMD lanes / GPU streams when available). `chunk_size` is the parallelism
+    knob and the peak-memory knob — larger means more concurrent solves but
+    higher RAM, since every batch member carries its own adaptive-solver state.
+
+    Parameters
+    ----------
+    M : dict
+        Reference model. Provides parameter defaults for non-scanned slots and
+        the true-value markers on the plot.
+    T : float
+        Simulation horizon (s). Defaults `sigma` to 0.01*T if not given.
+    forward_solve_jax : callable
+        `forward_solve_jax(p_vec, t_save) -> ys` from the notebook (closes over
+        the frozen IC and tau0_1/tau0_2).
+    u1_obs, u2_obs : array-like
+        Observations sampled on `t_ref`.
+    t_ref : array-like, optional
+        Reference grid for J. Defaults to `linspace(0, T, n_save)`.
+    params : (str, str)
+        The two parameters to scan, from `{'a1','a2','k0','k12'}`. Plot x is
+        params[0], plot y is params[1].
+    n1, n2 : int
+        Sampling density along each axis. Total evaluations = `n1 * n2`.
+    sigma : float, optional
+        Gaussian smoothing scale on `t_ref`. Defaults to `0.01 * T` (matches
+        the notebook's `sigma_smooth`).
+    p1_range, p2_range : (lo, hi) tuples, optional
+        Override the default ranges (±15% on a, ±30% on k).
+    chunk_size : int, optional
+        vmap batch size. Defaults to `min(64, n1*n2)`.
+    n_save : int
+        Number of t_ref points if not supplied.
+    view_init : (elev, azim)
+        Matplotlib 3D viewing angle for the surface panel.
+    save_dir : str or None
+        Output directory for the PNG. None disables saving.
+
+    Returns
+    -------
+    dict with `p1_name`, `p2_name`, `p1_vals`, `p2_vals`, `J_grid`,
+    `logJ_grid`, `sigma`.
+    """
+    import jax
+    import jax.numpy as jnp
+    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d proj)
+
+    PARAM_IDX = {'a1': 0, 'a2': 1, 'k0': 2, 'k12': 3}
+    p1_name, p2_name = params
+    if p1_name not in PARAM_IDX or p2_name not in PARAM_IDX:
+        raise ValueError(f"params must be from {list(PARAM_IDX)}, got {params}")
+    if p1_name == p2_name:
+        raise ValueError("params must be two distinct names")
+    idx_p1 = PARAM_IDX[p1_name]
+    idx_p2 = PARAM_IDX[p2_name]
+
+    def _default_range(name):
+        if name in ('a1', 'a2'):
+            return (M[name] * 0.85, M[name] * 1.15)
+        return (0.7 * M[name], 1.3 * M[name])
+
+    p1_lo, p1_hi = p1_range if p1_range is not None else _default_range(p1_name)
+    p2_lo, p2_hi = p2_range if p2_range is not None else _default_range(p2_name)
+
+    p1_vals = np.linspace(p1_lo, p1_hi, n1)
+    p2_vals = np.linspace(p2_lo, p2_hi, n2)
+
+    if t_ref is None:
+        t_ref_np = np.linspace(0.0, T, n_save)
+    else:
+        t_ref_np = np.asarray(t_ref)
+    t_ref_j = jnp.asarray(t_ref_np)
+
+    if sigma is None:
+        sigma = 0.01 * T
+
+    u1_obs_np = np.asarray(u1_obs)
+    u2_obs_np = np.asarray(u2_obs)
+
+    if sigma == 0:
+        Su1 = jnp.asarray(u1_obs_np)
+        Su2 = jnp.asarray(u2_obs_np)
+        def J_fn(p_vec):
+            ys = forward_solve_jax(p_vec, t_ref_j)
+            r1 = ys[:, 0] - Su1
+            r2 = ys[:, 2] - Su2
+            return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+    else:
+        S_np = make_smoothing_matrix(t_ref_np, sigma)
+        S_j  = jnp.asarray(S_np)
+        Su1 = jnp.asarray(S_np @ u1_obs_np)
+        Su2 = jnp.asarray(S_np @ u2_obs_np)
+        def J_fn(p_vec):
+            ys = forward_solve_jax(p_vec, t_ref_j)
+            r1 = S_j @ ys[:, 0] - Su1
+            r2 = S_j @ ys[:, 2] - Su2
+            return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+
+    # vmap-parallelised batched evaluator. No grad is taken — surface scans
+    # do not need backprop, and skipping it halves the per-point cost.
+    J_batched = jax.jit(jax.vmap(J_fn))
+
+    p_base = np.array([M['a1'], M['a2'], M['k0'], M['k12']], dtype=np.float64)
+
+    # (n1*n2, 4) parameter grid, row-major over (i, j) = (p1_idx, p2_idx).
+    P1, P2 = np.meshgrid(p1_vals, p2_vals, indexing='ij')
+    p_grid = np.tile(p_base, (n1 * n2, 1))
+    p_grid[:, idx_p1] = P1.ravel()
+    p_grid[:, idx_p2] = P2.ravel()
+
+    if chunk_size is None:
+        chunk_size = min(64, n1 * n2)
+
+    print(f"\n{'='*60}")
+    print(f"2D landscape: ({p1_name}, {p2_name})  grid = {n1} x {n2}  "
+          f"({n1*n2} evaluations)")
+    print(f"  {p1_name}: [{p1_lo:.5g}, {p1_hi:.5g}]")
+    print(f"  {p2_name}: [{p2_lo:.5g}, {p2_hi:.5g}]")
+    print(f"  sigma = {sigma:.3e} s   vmap chunk = {chunk_size}")
+
+    n_chunks = (n1 * n2 + chunk_size - 1) // chunk_size
+    J_flat = np.full(n1 * n2, np.nan)
+
+    t_start = time.time()
+    for ci in range(n_chunks):
+        i0 = ci * chunk_size
+        i1 = min(i0 + chunk_size, n1 * n2)
+        # Pad the final chunk to keep the JIT cache hot (same trace shape).
+        chunk_arr = p_grid[i0:i1]
+        pad = chunk_size - chunk_arr.shape[0]
+        if pad > 0:
+            chunk_arr = np.vstack([chunk_arr, np.tile(p_base, (pad, 1))])
+        Js = J_batched(jnp.asarray(chunk_arr))
+        Js.block_until_ready()
+        J_flat[i0:i1] = np.asarray(Js)[:i1 - i0]
+        if (ci + 1) % 4 == 0 or ci == n_chunks - 1:
+            print(f"  chunk [{ci+1}/{n_chunks}]  ({i1}/{n1*n2} pts)  "
+                  f"elapsed {time.time()-t_start:.1f}s")
+
+    elapsed = time.time() - t_start
+    print(f"Done in {elapsed:.1f} s  ({elapsed/(n1*n2)*1000:.1f} ms/point)")
+
+    J_grid    = J_flat.reshape(n1, n2)
+    logJ_grid = np.log10(np.where(J_grid > 0, J_grid, np.nan))
+
+    # ----------------------------------------------------------------------
+    # 3D surface + companion contour view
+    # ----------------------------------------------------------------------
+    _xlabel = {'a1': r'$a_1$', 'a2': r'$a_2$',
+               'k0': r'$k_0$ (MPa/m)', 'k12': r'$k_{12}$ (MPa/m)'}
+    p1_true, p2_true = M[p1_name], M[p2_name]
+
+    fig = plt.figure(figsize=(13, 6))
+    ax_s = fig.add_subplot(1, 2, 1, projection='3d')
+    surf = ax_s.plot_surface(P1, P2, logJ_grid,
+                              cmap='viridis', edgecolor='none', alpha=0.92,
+                              rstride=1, cstride=1)
+    i1_t = int(np.argmin(np.abs(p1_vals - p1_true)))
+    i2_t = int(np.argmin(np.abs(p2_vals - p2_true)))
+    if np.isfinite(logJ_grid[i1_t, i2_t]):
+        ax_s.scatter([p1_true], [p2_true], [float(logJ_grid[i1_t, i2_t])],
+                     color='red', s=70, marker='*',
+                     label=f'true ({p1_name}, {p2_name})', zorder=10)
+    ax_s.set_xlabel(_xlabel[p1_name])
+    ax_s.set_ylabel(_xlabel[p2_name])
+    ax_s.set_zlabel(r'$\log_{10} J$')
+    ax_s.set_title(f'$J({p1_name}, {p2_name})$  surface  (log scale)')
+    ax_s.view_init(elev=view_init[0], azim=view_init[1])
+    ax_s.legend(fontsize=8, loc='upper left')
+    fig.colorbar(surf, ax=ax_s, shrink=0.6, pad=0.1, label=r'$\log_{10} J$')
+
+    ax_c = fig.add_subplot(1, 2, 2)
+    cf = ax_c.contourf(P1, P2, logJ_grid, levels=30, cmap='viridis')
+    ax_c.contour(P1, P2, logJ_grid, levels=15,
+                 colors='k', linewidths=0.4, alpha=0.5)
+    ax_c.scatter([p1_true], [p2_true],
+                 color='red', s=110, marker='*', edgecolor='white', linewidth=1.0,
+                 label=f'true ({p1_true:.4g}, {p2_true:.4g})', zorder=10)
+    if np.isfinite(J_grid).any():
+        imin = np.unravel_index(np.nanargmin(J_grid), J_grid.shape)
+        ax_c.scatter([p1_vals[imin[0]]], [p2_vals[imin[1]]],
+                     color='cyan', s=90, marker='o',
+                     edgecolor='black', linewidth=0.8,
+                     label=f'grid min @ ({p1_vals[imin[0]]:.4g}, '
+                           f'{p2_vals[imin[1]]:.4g})',
+                     zorder=11)
+    ax_c.set_xlabel(_xlabel[p1_name])
+    ax_c.set_ylabel(_xlabel[p2_name])
+    ax_c.set_title(f'$\\log_{{10}} J({p1_name}, {p2_name})$  contour')
+    ax_c.legend(fontsize=8, loc='best')
+    fig.colorbar(cf, ax=ax_c, shrink=0.85, label=r'$\log_{10} J$')
+
+    fig.suptitle(
+        f'2D objective landscape — discrete adjoint via JAX/Diffrax  '
+        f'($\\sigma$ = {sigma:.2e} s, grid {n1}x{n2})'
+    )
+    plt.tight_layout()
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        fname = os.path.join(save_dir,
+                              f'J_landscape_2d_{p1_name}_{p2_name}_jax.png')
+        plt.savefig(fname, dpi=150, bbox_inches='tight')
+    plt.show()
+
+    print()
+    print(f"True location:  ({p1_name}={p1_true:.5g}, {p2_name}={p2_true:.5g})")
+    if np.isfinite(J_grid).any():
+        imin = np.unravel_index(np.nanargmin(J_grid), J_grid.shape)
+        print(f"Grid minimum:   ({p1_name}={p1_vals[imin[0]]:.5g}, "
+              f"{p2_name}={p2_vals[imin[1]]:.5g})")
+        print(f"  J at true grid pt = {J_grid[i1_t, i2_t]:.3e}")
+        print(f"  J at grid min     = {J_grid[imin]:.3e}")
+
+    return {
+        'p1_name':   p1_name,
+        'p2_name':   p2_name,
+        'p1_vals':   p1_vals,
+        'p2_vals':   p2_vals,
+        'J_grid':    J_grid,
+        'logJ_grid': logJ_grid,
+        'sigma':     sigma,
+    }
