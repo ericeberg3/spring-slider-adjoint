@@ -669,3 +669,254 @@ def run_J_landscape(M_true, T, V1_init, V2_init,
         }
 
     return results
+
+
+# ======================================================================
+# Objective-function landscape scan (JAX / discrete adjoint via Diffrax)
+# ======================================================================
+def run_J_landscape_jax(M_true, T,
+                        forward_solve_jax,
+                        u1_obs, u2_obs,
+                        t_ref=None,
+                        landscape_params=('a2',),
+                        compute_gradient=False,
+                        sigma_inversion=None,
+                        n_save=1000,
+                        save_dir='Figures'):
+    """JAX/Diffrax counterpart of `run_J_landscape` for the discrete-adjoint
+    notebook. Scans J(p) under several Gaussian-smoothing levels for each
+    parameter in `landscape_params`, using the JIT'd JAX forward solver
+    provided by the notebook (which closes over the frozen IC and tau0).
+    Optionally overlays gradient arrows obtained by `jax.value_and_grad`
+    backpropagating through Diffrax's `RecursiveCheckpointAdjoint`.
+
+    Unlike the numpy version, every smoothing case here saves on the same
+    fixed `t_ref` grid and runs against the same frozen IC (baked into
+    `forward_solve_jax` by closure) — there is no per-iterate IC step.
+
+    Parameters
+    ----------
+    M_true : dict
+        Reference model. Provides a1/a2/k0/k12 baselines and scan ranges.
+    T : float
+        Simulation horizon (s); sets sigma scales.
+    forward_solve_jax : callable
+        `forward_solve_jax(p_vec, t_save) -> ys` of shape `(len(t_save), 4)`
+        with state ordering `(u1, psi1, u2, psi2)`.
+    u1_obs, u2_obs : array-like
+        Synthetic observations sampled on `t_ref` (if `t_ref` is None they
+        must be sampled on `linspace(0, T, n_save)`).
+    t_ref : array-like, optional
+        Reference grid for `J`. Defaults to `linspace(0, T, n_save)`.
+    landscape_params : tuple of str
+        Subset of `{'a1','a2','k0','k12'}` to scan.
+    compute_gradient : bool
+        If True, also compute `dJ/dp` via `jax.value_and_grad` and overlay
+        gradient arrows on the linear-scale plot.
+    sigma_inversion : float, optional
+        Smoothing length used by the "Inversion" curve. Defaults to
+        `0.1 * T` to match the numpy landscape's labelling. Pass the
+        notebook's own `sigma_smooth` here to make the "Inversion" curve
+        match the optimizer's J exactly.
+    n_save : int
+        Number of save points if `t_ref` is None.
+    save_dir : str or None
+        Directory for output PNGs. None disables saving.
+
+    Returns
+    -------
+    results : dict keyed by scan param, with `p_scan`, `J`, `grad`,
+    `smoothing_cases` arrays (same shape convention as `run_J_landscape`).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    if t_ref is None:
+        t_ref_np = np.linspace(0.0, T, n_save)
+    else:
+        t_ref_np = np.asarray(t_ref)
+    t_ref_j = jnp.asarray(t_ref_np)
+
+    u1_obs_np = np.asarray(u1_obs)
+    u2_obs_np = np.asarray(u2_obs)
+
+    sigma_medium = 0.01 * T
+    sigma_heavy  = 0.2  * T
+    if sigma_inversion is None:
+        sigma_inversion = 0.1 * T
+
+    smoothing_cases = [
+        ('No smoothing (identity)',                            None,            'C0', 'native'),
+        (f'Medium  ($\\sigma$ = {sigma_medium:.1e} s)',        sigma_medium,    'C1', 'native'),
+        (f'Heavy   ($\\sigma$ = {sigma_heavy:.1e} s)',         sigma_heavy,     'C2', 'native'),
+        (f'Inversion ($\\sigma$ = {sigma_inversion:.1e} s, fixed t_ref)',
+                                                               sigma_inversion, 'C3', 'inversion'),
+    ]
+
+    # Per-smoothing-case jitted value-and-grad. Each closes over its own
+    # smoothing matrix and pre-smoothed observations so JAX can fold them
+    # into the compiled graph.
+    def _make_J_and_grad(sigma):
+        if sigma is None:
+            Su1_obs = jnp.asarray(u1_obs_np)
+            Su2_obs = jnp.asarray(u2_obs_np)
+            def J_fn(p_vec):
+                ys = forward_solve_jax(p_vec, t_ref_j)
+                r1 = ys[:, 0] - Su1_obs
+                r2 = ys[:, 2] - Su2_obs
+                return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+        else:
+            S_np = make_smoothing_matrix(t_ref_np, sigma)
+            S_j  = jnp.asarray(S_np)
+            Su1_obs = jnp.asarray(S_np @ u1_obs_np)
+            Su2_obs = jnp.asarray(S_np @ u2_obs_np)
+            def J_fn(p_vec):
+                ys = forward_solve_jax(p_vec, t_ref_j)
+                r1 = S_j @ ys[:, 0] - Su1_obs
+                r2 = S_j @ ys[:, 2] - Su2_obs
+                return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+        return jax.jit(jax.value_and_grad(J_fn))
+
+    case_J_and_grad = [_make_J_and_grad(sigma) for _, sigma, _, _ in smoothing_cases]
+
+    PARAM_IDX = {'a1': 0, 'a2': 1, 'k0': 2, 'k12': 3}
+    p_base = jnp.array([M_true['a1'], M_true['a2'], M_true['k0'], M_true['k12']],
+                       dtype=jnp.float64)
+
+    _scan_config = {
+        'a1': {
+            'vals':     np.linspace(M_true['a1'] * 0.7, M_true['a1'] * 1.3, 60),
+            'true_val': M_true['a1'],
+            'xlabel':   '$a_1$',
+            'title_J':  '$J(a_1)$',
+        },
+        'a2': {
+            'vals':     np.linspace(M_true['a2'] * 0.7, M_true['a2'] * 1.3, 60),
+            'true_val': M_true['a2'],
+            'xlabel':   '$a_2$',
+            'title_J':  '$J(a_2)$',
+        },
+        'k0': {
+            'vals':     np.linspace(0.7 * M_true['k0'], 1.3 * M_true['k0'], 60),
+            'true_val': M_true['k0'],
+            'xlabel':   '$k_0$  (MPa/m)',
+            'title_J':  '$J(k_0)$',
+        },
+        'k12': {
+            'vals':     np.linspace(0.7 * M_true['k12'], 1.3 * M_true['k12'], 60),
+            'true_val': M_true['k12'],
+            'xlabel':   '$k_{12}$  (MPa/m)',
+            'title_J':  '$J(k_{12})$',
+        },
+    }
+
+    results = {}
+
+    for scan_param in landscape_params:
+        cfg     = _scan_config[scan_param]
+        p_scan  = cfg['vals']
+        p_true  = cfg['true_val']
+        idx_p   = PARAM_IDX[scan_param]
+
+        print(f"\n{'='*60}")
+        print(f"Landscape: {scan_param}  (true = {p_true:.5g})")
+        print(f"Evaluating {len(p_scan)} parameter values "
+              f"x {len(smoothing_cases)} smoothing cases"
+              f"{'  (with AD gradients)' if compute_gradient else ''} ...")
+
+        J_results    = {lbl: np.full(len(p_scan), np.nan) for lbl, _, _, _ in smoothing_cases}
+        grad_results = {lbl: np.full(len(p_scan), np.nan) for lbl, _, _, _ in smoothing_cases}
+
+        t_start = time.time()
+        for i, p_val in enumerate(p_scan):
+            p_vec = p_base.at[idx_p].set(float(p_val))
+            for j, (label, _, _, _) in enumerate(smoothing_cases):
+                Jv, gv = case_J_and_grad[j](p_vec)
+                Jv.block_until_ready()
+                J_results[label][i] = float(Jv)
+                if compute_gradient:
+                    grad_results[label][i] = float(np.asarray(gv)[idx_p])
+            if (i + 1) % 8 == 0 or i == len(p_scan) - 1:
+                print(f"  [{i+1}/{len(p_scan)}]  {scan_param}={p_val:.5g}")
+        elapsed = time.time() - t_start
+        print(f"  Done in {elapsed:.1f} s "
+              f"({elapsed/(len(p_scan)*len(smoothing_cases)):.2f} s/eval)")
+
+        fig, axes = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
+        for label, sigma, color, kind in smoothing_cases:
+            J_arr = J_results[label]
+            J_pos = np.where(J_arr > 0, J_arr, np.nan)
+            ls = '--' if kind == 'inversion' else '-'
+            axes[0].plot(p_scan, J_arr,  marker='o', ms=3, lw=1.5, ls=ls, color=color, label=label)
+            axes[1].semilogy(p_scan, J_pos, marker='o', ms=3, lw=1.5, ls=ls, color=color, label=label)
+
+        if compute_gradient:
+            p_range  = p_scan[-1] - p_scan[0]
+            all_J    = np.concatenate([J_results[lbl] for lbl, _, _, _ in smoothing_cases])
+            J_range  = np.nanmax(all_J) - np.nanmin(all_J)
+            arrow_frac = 0.04
+            g_global_max = max(
+                np.nanmax(np.abs(grad_results[lbl])) for lbl, _, _, _ in smoothing_cases
+            )
+
+            for label, sigma, color, kind in smoothing_cases:
+                J_arr = J_results[label]
+                g_arr = grad_results[label]
+                valid = ~np.isnan(g_arr) & ~np.isnan(J_arr)
+                p_v, J_v, g_v = p_scan[valid], J_arr[valid], g_arr[valid]
+                hat_x  = 1.0 / p_range
+                hat_y  = g_v / J_range
+                mag_hat = np.sqrt(hat_x**2 + hat_y**2)
+                rel_mag = np.abs(g_v) / (g_global_max + 1e-30)
+                U      = arrow_frac * (hat_x / mag_hat) * rel_mag * p_range
+                V_arr  = arrow_frac * (hat_y / mag_hat) * rel_mag * J_range
+                axes[0].quiver(p_v, J_v, U, V_arr,
+                               color=color, scale=1, scale_units='xy', angles='xy',
+                               width=0.003, headwidth=5, headlength=5, zorder=5, alpha=0.9)
+
+            proxy = plt.Line2D([0], [0], marker=r'$\rightarrow$', color='gray',
+                               linestyle='none', markersize=10,
+                               label=f'AD $dJ/d{{{scan_param}}}$ (arrows)')
+
+        for ax in axes:
+            ax.axvline(p_true, color='red', ls='--', lw=1.2,
+                       label=f'${scan_param}_{{\\rm true}}$ = {p_true:.5g}')
+            handles, lbls = ax.get_legend_handles_labels()
+            if ax is axes[0] and compute_gradient:
+                ax.legend(handles + [proxy], lbls + [proxy.get_label()],
+                          fontsize=8, ncol=2)
+            else:
+                ax.legend(fontsize=8)
+            ax.grid(True, ls=':', lw=0.5, which='both')
+
+        axes[-1].set_xlabel(cfg['xlabel'])
+        axes[0].set_ylabel(f'Objective {cfg["title_J"]}')
+        grad_tag = (f'Arrows: discrete-adjoint AD gradient $dJ/d{{{scan_param}}}$'
+                    if compute_gradient else 'Gradient: OFF')
+        axes[0].set_title(
+            f'Objective function landscape {cfg["title_J"]} — effect of smoothing  '
+            f'(JAX / Diffrax discrete adjoint)\n{grad_tag}'
+        )
+        axes[1].set_ylabel(f'{cfg["title_J"]}  (log scale)')
+
+        plt.tight_layout()
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fname = os.path.join(save_dir, f'J_landscape_{scan_param}_smoothing_jax.png')
+            plt.savefig(fname, dpi=150, bbox_inches='tight')
+        plt.show()
+
+        print()
+        for label, sigma, _, _ in smoothing_cases:
+            J_arr = J_results[label]
+            imin  = np.nanargmin(J_arr)
+            print(f"{label:60s}  min J = {J_arr[imin]:.3e}  at {scan_param} = {p_scan[imin]:.5g}")
+
+        results[scan_param] = {
+            'p_scan': p_scan,
+            'J':      J_results,
+            'grad':   grad_results,
+            'smoothing_cases': smoothing_cases,
+        }
+
+    return results
