@@ -1000,7 +1000,7 @@ def run_J_landscape_2d_jax(M, T,
     def _default_range(name):
         if name in ('a1', 'a2'):
             return (M[name] * 0.85, M[name] * 1.15)
-        return (0.7 * M[name], 1.3 * M[name])
+        return (0.85 * M[name], 1.15 * M[name])
 
     p1_lo, p1_hi = p1_range if p1_range is not None else _default_range(p1_name)
     p2_lo, p2_hi = p2_range if p2_range is not None else _default_range(p2_name)
