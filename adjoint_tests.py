@@ -936,7 +936,8 @@ def run_J_landscape_2d_jax(M, T,
                            chunk_size=None,
                            n_save=1000,
                            view_init=(30, -60),
-                           save_dir='Figures'):
+                           save_dir='Figures',
+                           p_final=None):
     """3D surface scan of log10(J) over two parameters, batched-parallel via
     `jax.vmap` through the Diffrax discrete-adjoint stack.
 
@@ -978,6 +979,10 @@ def run_J_landscape_2d_jax(M, T,
         Matplotlib 3D viewing angle for the surface panel.
     save_dir : str or None
         Output directory for the PNG. None disables saving.
+    p_final : dict or array-like, optional
+        Final-guess parameter values to overlay on both plots. Either a dict
+        keyed by parameter name (only `params[0]` and `params[1]` are read) or
+        a length-4 array in canonical (`a1`, `a2`, `k0`, `k12`) order.
 
     Returns
     -------
@@ -999,8 +1004,8 @@ def run_J_landscape_2d_jax(M, T,
 
     def _default_range(name):
         if name in ('a1', 'a2'):
-            return (M[name] * 0.85, M[name] * 1.15)
-        return (0.85 * M[name], 1.15 * M[name])
+            return (M[name] * 0.7, M[name] * 1.3)
+        return (0.7 * M[name], 1.3 * M[name])
 
     p1_lo, p1_hi = p1_range if p1_range is not None else _default_range(p1_name)
     p2_lo, p2_hi = p2_range if p2_range is not None else _default_range(p2_name)
@@ -1093,6 +1098,20 @@ def run_J_landscape_2d_jax(M, T,
                'k0': r'$k_0$ (MPa/m)', 'k12': r'$k_{12}$ (MPa/m)'}
     p1_true, p2_true = M[p1_name], M[p2_name]
 
+    # Resolve p_final into (p1_fin, p2_fin) if provided.
+    p1_fin = p2_fin = None
+    if p_final is not None:
+        if isinstance(p_final, dict):
+            p1_fin = p_final.get(p1_name)
+            p2_fin = p_final.get(p2_name)
+        else:
+            arr = np.asarray(p_final, dtype=float).ravel()
+            if arr.size != 4:
+                raise ValueError("p_final array must have length 4 in "
+                                 "(a1, a2, k0, k12) order")
+            p1_fin = float(arr[idx_p1])
+            p2_fin = float(arr[idx_p2])
+
     fig = plt.figure(figsize=(13, 6))
     ax_s = fig.add_subplot(1, 2, 1, projection='3d')
     surf = ax_s.plot_surface(P1, P2, logJ_grid,
@@ -1104,6 +1123,15 @@ def run_J_landscape_2d_jax(M, T,
         ax_s.scatter([p1_true], [p2_true], [float(logJ_grid[i1_t, i2_t])],
                      color='red', s=70, marker='*',
                      label=f'true ({p1_name}, {p2_name})', zorder=10)
+    if p1_fin is not None and p2_fin is not None:
+        i1_f = int(np.argmin(np.abs(p1_vals - p1_fin)))
+        i2_f = int(np.argmin(np.abs(p2_vals - p2_fin)))
+        if np.isfinite(logJ_grid[i1_f, i2_f]):
+            ax_s.scatter([p1_fin], [p2_fin], [float(logJ_grid[i1_f, i2_f])],
+                         color='magenta', s=90, marker='X',
+                         edgecolor='white', linewidth=0.8,
+                         label=f'final guess ({p1_fin:.4g}, {p2_fin:.4g})',
+                         zorder=11)
     ax_s.set_xlabel(_xlabel[p1_name])
     ax_s.set_ylabel(_xlabel[p2_name])
     ax_s.set_zlabel(r'$\log_{10} J$')
@@ -1127,6 +1155,12 @@ def run_J_landscape_2d_jax(M, T,
                      label=f'grid min @ ({p1_vals[imin[0]]:.4g}, '
                            f'{p2_vals[imin[1]]:.4g})',
                      zorder=11)
+    if p1_fin is not None and p2_fin is not None:
+        ax_c.scatter([p1_fin], [p2_fin],
+                     color='magenta', s=130, marker='X',
+                     edgecolor='white', linewidth=1.0,
+                     label=f'final guess ({p1_fin:.4g}, {p2_fin:.4g})',
+                     zorder=12)
     ax_c.set_xlabel(_xlabel[p1_name])
     ax_c.set_ylabel(_xlabel[p2_name])
     ax_c.set_title(f'$\\log_{{10}} J({p1_name}, {p2_name})$  contour')
@@ -1153,6 +1187,13 @@ def run_J_landscape_2d_jax(M, T,
               f"{p2_name}={p2_vals[imin[1]]:.5g})")
         print(f"  J at true grid pt = {J_grid[i1_t, i2_t]:.3e}")
         print(f"  J at grid min     = {J_grid[imin]:.3e}")
+    if p1_fin is not None and p2_fin is not None:
+        i1_f = int(np.argmin(np.abs(p1_vals - p1_fin)))
+        i2_f = int(np.argmin(np.abs(p2_vals - p2_fin)))
+        print(f"Final guess:    ({p1_name}={p1_fin:.5g}, "
+              f"{p2_name}={p2_fin:.5g})")
+        if np.isfinite(J_grid[i1_f, i2_f]):
+            print(f"  J at final-guess grid pt = {J_grid[i1_f, i2_f]:.3e}")
 
     return {
         'p1_name':   p1_name,
