@@ -937,7 +937,15 @@ def run_J_landscape_2d_jax(M, T,
                            n_save=1000,
                            view_init=(30, -60),
                            save_dir='Figures',
-                           p_final=None):
+                           p_final=None,
+                           samples=None,
+                           best_samples=None,
+                           n_best=0,
+                           show_exploration_heatmap=False,
+                           exploration_bins=30,
+                           exploration_cmap='Reds',
+                           residual='slip',
+                           compute_V_fn=None):
     """3D surface scan of log10(J) over two parameters, batched-parallel via
     `jax.vmap` through the Diffrax discrete-adjoint stack.
 
@@ -983,6 +991,43 @@ def run_J_landscape_2d_jax(M, T,
         Final-guess parameter values to overlay on both plots. Either a dict
         keyed by parameter name (only `params[0]` and `params[1]` are read) or
         a length-4 array in canonical (`a1`, `a2`, `k0`, `k12`) order.
+    samples : dict, optional
+        Per-evaluation history from the optimiser. Must contain 1-D arrays
+        keyed by `params[0]`, `params[1]`, and `'J'`, all of the same length
+        (one entry per objective evaluation). Drives the exploration heatmap,
+        and — if `best_samples` is not given — also the N-best scatter.
+    best_samples : dict, optional
+        Per-endpoint minima from the optimiser (e.g. one converged result per
+        multistart start, or one entry per accepted basinhopping basin). Same
+        key/shape contract as `samples`. When provided, the N-best scatter
+        picks from this set instead of `samples` — so the markers are
+        distinct optimizer endpoints rather than consecutive iterations of a
+        single descent. Leave `None` to fall back to `samples`.
+    n_best : int
+        Scatter the N samples with the smallest `J` on both the surface and
+        contour panels. `0` disables.
+    show_exploration_heatmap : bool
+        If True, overlay a 2-D histogram of sample `(p1, p2)` locations on
+        the contour panel — visualises where the optimiser concentrated its
+        evaluations. No effect on the 3-D surface.
+    exploration_bins : int
+        Bin count along each axis for the exploration histogram.
+    exploration_cmap : str
+        Matplotlib colormap for the exploration heatmap. Picked so it
+        contrasts with the viridis contour underneath.
+    residual : {'slip', 'logV'}
+        Which observable enters the residual. 'slip' (default) uses
+        `S @ u_i - S @ u_{i,obs}` — the same form the optimiser sees.
+        'logV' uses `S @ log V_i - S @ log V_{i,obs}`; this is much less
+        sensitive to event-timing jitter (slip carries step-like offsets
+        whenever a fast event shifts in time, whereas log V is bounded and
+        smooth between events). Useful for diagnosing whether bumpy
+        landscape topology comes from the observable choice or the physics.
+    compute_V_fn : callable, optional
+        Required when `residual='logV'`. Signature
+        `compute_V_fn(p_vec, ys, t_save) -> (V1, V2)`, each of shape
+        `(len(t_save),)`. Typically defined in the calling notebook as a
+        closure over `solve_V`, `tau0_1`, `tau0_2`, `V_bg`, `N1`, `N2`.
 
     Returns
     -------
@@ -1004,8 +1049,8 @@ def run_J_landscape_2d_jax(M, T,
 
     def _default_range(name):
         if name in ('a1', 'a2'):
-            return (M[name] * 0.7, M[name] * 1.3)
-        return (0.7 * M[name], 1.3 * M[name])
+            return (M[name] * 0.6, M[name] * 1.4)
+        return (0.6 * M[name], 1.4 * M[name])
 
     p1_lo, p1_hi = p1_range if p1_range is not None else _default_range(p1_name)
     p2_lo, p2_hi = p2_range if p2_range is not None else _default_range(p2_name)
@@ -1025,24 +1070,63 @@ def run_J_landscape_2d_jax(M, T,
     u1_obs_np = np.asarray(u1_obs)
     u2_obs_np = np.asarray(u2_obs)
 
-    if sigma == 0:
-        Su1 = jnp.asarray(u1_obs_np)
-        Su2 = jnp.asarray(u2_obs_np)
-        def J_fn(p_vec):
-            ys = forward_solve_jax(p_vec, t_ref_j)
-            r1 = ys[:, 0] - Su1
-            r2 = ys[:, 2] - Su2
-            return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+    if residual not in ('slip', 'logV'):
+        raise ValueError(f"residual must be 'slip' or 'logV', got {residual!r}")
+    if residual == 'logV' and compute_V_fn is None:
+        raise ValueError("residual='logV' requires compute_V_fn (a callable "
+                         "(p_vec, ys, t_save) -> (V1, V2)). See notebook.")
+
+    if residual == 'slip':
+        if sigma == 0:
+            Su1 = jnp.asarray(u1_obs_np)
+            Su2 = jnp.asarray(u2_obs_np)
+            def J_fn(p_vec):
+                ys = forward_solve_jax(p_vec, t_ref_j)
+                r1 = ys[:, 0] - Su1
+                r2 = ys[:, 2] - Su2
+                return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+        else:
+            S_np = make_smoothing_matrix(t_ref_np, sigma)
+            S_j  = jnp.asarray(S_np)
+            Su1 = jnp.asarray(S_np @ u1_obs_np)
+            Su2 = jnp.asarray(S_np @ u2_obs_np)
+            def J_fn(p_vec):
+                ys = forward_solve_jax(p_vec, t_ref_j)
+                r1 = S_j @ ys[:, 0] - Su1
+                r2 = S_j @ ys[:, 2] - Su2
+                return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
     else:
-        S_np = make_smoothing_matrix(t_ref_np, sigma)
-        S_j  = jnp.asarray(S_np)
-        Su1 = jnp.asarray(S_np @ u1_obs_np)
-        Su2 = jnp.asarray(S_np @ u2_obs_np)
-        def J_fn(p_vec):
-            ys = forward_solve_jax(p_vec, t_ref_j)
-            r1 = S_j @ ys[:, 0] - Su1
-            r2 = S_j @ ys[:, 2] - Su2
-            return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+        # residual == 'logV'. Observations of u alone don't pin down V (the
+        # algebraic constraint also needs psi and the candidate parameters).
+        # Recompute the full obs state at the true parameters via the same
+        # forward solver, then derive V_obs via compute_V_fn.
+        p_true_vec = jnp.array([M['a1'], M['a2'], M['k0'], M['k12']],
+                                dtype=jnp.float64)
+        ys_obs_full = forward_solve_jax(p_true_vec, t_ref_j)
+        V1_obs_j, V2_obs_j = compute_V_fn(p_true_vec, ys_obs_full, t_ref_j)
+        logV1_obs = jnp.log(V1_obs_j)
+        logV2_obs = jnp.log(V2_obs_j)
+
+        if sigma == 0:
+            S_logV1_obs = logV1_obs
+            S_logV2_obs = logV2_obs
+            def J_fn(p_vec):
+                ys = forward_solve_jax(p_vec, t_ref_j)
+                V1, V2 = compute_V_fn(p_vec, ys, t_ref_j)
+                r1 = jnp.log(V1) - S_logV1_obs
+                r2 = jnp.log(V2) - S_logV2_obs
+                return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
+        else:
+            S_np = make_smoothing_matrix(t_ref_np, sigma)
+            S_j  = jnp.asarray(S_np)
+            S_logV1_obs = S_j @ logV1_obs
+            S_logV2_obs = S_j @ logV2_obs
+            def J_fn(p_vec):
+                ys = forward_solve_jax(p_vec, t_ref_j)
+                V1, V2 = compute_V_fn(p_vec, ys, t_ref_j)
+                r1 = S_j @ jnp.log(V1) - S_logV1_obs
+                r2 = S_j @ jnp.log(V2) - S_logV2_obs
+                return 0.5 * jnp.trapezoid(r1**2 + r2**2, t_ref_j)
 
     # vmap-parallelised batched evaluator. No grad is taken — surface scans
     # do not need backprop, and skipping it halves the per-point cost.
@@ -1064,7 +1148,8 @@ def run_J_landscape_2d_jax(M, T,
           f"({n1*n2} evaluations)")
     print(f"  {p1_name}: [{p1_lo:.5g}, {p1_hi:.5g}]")
     print(f"  {p2_name}: [{p2_lo:.5g}, {p2_hi:.5g}]")
-    print(f"  sigma = {sigma:.3e} s   vmap chunk = {chunk_size}")
+    print(f"  sigma = {sigma:.3e} s   vmap chunk = {chunk_size}   "
+          f"residual = {residual!r}")
 
     n_chunks = (n1 * n2 + chunk_size - 1) // chunk_size
     J_flat = np.full(n1 * n2, np.nan)
@@ -1112,6 +1197,71 @@ def run_J_landscape_2d_jax(M, T,
             p1_fin = float(arr[idx_p1])
             p2_fin = float(arr[idx_p2])
 
+    def _unpack(d, label):
+        # Validate-and-extract (p1_arr, p2_arr, J_arr) from a samples-style dict.
+        for required in (p1_name, p2_name, 'J'):
+            if required not in d:
+                raise ValueError(f"{label} missing required key {required!r}; "
+                                 f"got {list(d)}")
+        a = np.asarray(d[p1_name], dtype=float).ravel()
+        b = np.asarray(d[p2_name], dtype=float).ravel()
+        J = np.asarray(d['J'],     dtype=float).ravel()
+        if not (a.size == b.size == J.size):
+            raise ValueError(
+                f"{label} arrays must all have the same length; got "
+                f"{p1_name}: {a.size}, {p2_name}: {b.size}, J: {J.size}")
+        return a, b, J
+
+    # `samples` drives the heatmap. `best_samples` (or `samples` as fallback)
+    # drives the N-best scatter. Splitting them lets callers use the full
+    # eval history for the heatmap while picking the N-best from a separate
+    # set of distinct optimizer endpoints (per-start minima / per-basin
+    # acceptances), avoiding the "all 20 markers stack on one point because
+    # they are consecutive L-BFGS-B steps in one basin" failure mode.
+    p1_samp = p2_samp = J_samp = None
+    p1_best = p2_best = J_best = None
+    if samples is not None:
+        p1_samp, p2_samp, J_samp = _unpack(samples, 'samples')
+        print()
+        print(f"Samples overlay: {p1_samp.size} optimiser evaluations received")
+        if p1_samp.size == 0:
+            print("  (empty — did the inversion cell run before this one?)")
+        else:
+            in_range = ((p1_samp >= p1_lo) & (p1_samp <= p1_hi)
+                        & (p2_samp >= p2_lo) & (p2_samp <= p2_hi))
+            print(f"  {p1_name} range: [{p1_samp.min():.5g}, {p1_samp.max():.5g}]  "
+                  f"(axis: [{p1_lo:.5g}, {p1_hi:.5g}])")
+            print(f"  {p2_name} range: [{p2_samp.min():.5g}, {p2_samp.max():.5g}]  "
+                  f"(axis: [{p2_lo:.5g}, {p2_hi:.5g}])")
+            print(f"  within scan axes: {int(in_range.sum())} / {p1_samp.size}")
+
+    if n_best > 0:
+        if best_samples is not None:
+            p1_pool, p2_pool, J_pool = _unpack(best_samples, 'best_samples')
+            src_label = 'best_samples (per-endpoint minima)'
+        elif p1_samp is not None:
+            p1_pool, p2_pool, J_pool = p1_samp, p2_samp, J_samp
+            src_label = 'samples (per-evaluation)'
+        else:
+            p1_pool = None
+            src_label = None
+
+        if p1_pool is not None and p1_pool.size > 0:
+            k = int(min(n_best, p1_pool.size))
+            best_idx = np.argpartition(J_pool, k - 1)[:k]
+            best_idx = best_idx[np.argsort(J_pool[best_idx])]
+            p1_best = p1_pool[best_idx]
+            p2_best = p2_pool[best_idx]
+            J_best  = J_pool[best_idx]
+            in_best = ((p1_best >= p1_lo) & (p1_best <= p1_hi)
+                       & (p2_best >= p2_lo) & (p2_best <= p2_hi))
+            print(f"  N-best ({k}) picked from {src_label}; "
+                  f"within scan axes: {int(in_best.sum())} / {k}"
+                  + (
+                      "  -> axis will be extended on the contour panel"
+                      if int(in_best.sum()) < k else ""
+                  ))
+
     fig = plt.figure(figsize=(13, 6))
     ax_s = fig.add_subplot(1, 2, 1, projection='3d')
     surf = ax_s.plot_surface(P1, P2, logJ_grid,
@@ -1132,6 +1282,28 @@ def run_J_landscape_2d_jax(M, T,
                          edgecolor='white', linewidth=0.8,
                          label=f'final guess ({p1_fin:.4g}, {p2_fin:.4g})',
                          zorder=11)
+    if p1_best is not None:
+        # Surface: only plot best samples that lie within the scanned grid —
+        # nearest-grid-cell z for out-of-range points would pile them at the
+        # grid edge and mislead. The contour panel below extends its axes for
+        # out-of-range points instead.
+        in_grid = ((p1_best >= p1_lo) & (p1_best <= p1_hi)
+                   & (p2_best >= p2_lo) & (p2_best <= p2_hi))
+        if in_grid.any():
+            p1b, p2b, Jb = p1_best[in_grid], p2_best[in_grid], J_best[in_grid]
+            z_best = np.array([
+                logJ_grid[int(np.argmin(np.abs(p1_vals - x))),
+                          int(np.argmin(np.abs(p2_vals - y)))]
+                for x, y in zip(p1b, p2b)
+            ])
+            finite = np.isfinite(z_best)
+            if finite.any():
+                ax_s.scatter(p1b[finite], p2b[finite], z_best[finite],
+                             color='gold', s=55, marker='o',
+                             edgecolor='black', linewidth=0.6, alpha=0.85,
+                             label=f'{int(finite.sum())} of '
+                                   f'{len(p1_best)} best samples (in grid)',
+                             zorder=12)
     ax_s.set_xlabel(_xlabel[p1_name])
     ax_s.set_ylabel(_xlabel[p2_name])
     ax_s.set_zlabel(r'$\log_{10} J$')
@@ -1144,6 +1316,17 @@ def run_J_landscape_2d_jax(M, T,
     cf = ax_c.contourf(P1, P2, logJ_grid, levels=30, cmap='viridis')
     ax_c.contour(P1, P2, logJ_grid, levels=15,
                  colors='k', linewidths=0.4, alpha=0.5)
+    if show_exploration_heatmap and p1_samp is not None and p1_samp.size > 0:
+        hist_h, hist_xe, hist_ye = np.histogram2d(
+            p1_samp, p2_samp, bins=exploration_bins,
+            range=[[p1_lo, p1_hi], [p2_lo, p2_hi]],
+        )
+        masked = np.ma.masked_where(hist_h.T == 0, hist_h.T)
+        hm = ax_c.pcolormesh(hist_xe, hist_ye, masked,
+                             cmap=exploration_cmap, alpha=0.55,
+                             shading='auto', zorder=2)
+        fig.colorbar(hm, ax=ax_c, shrink=0.55, pad=0.02,
+                     label='# evaluations / bin')
     ax_c.scatter([p1_true], [p2_true],
                  color='red', s=110, marker='*', edgecolor='white', linewidth=1.0,
                  label=f'true ({p1_true:.4g}, {p2_true:.4g})', zorder=10)
@@ -1160,22 +1343,41 @@ def run_J_landscape_2d_jax(M, T,
                      color='magenta', s=130, marker='X',
                      edgecolor='white', linewidth=1.0,
                      label=f'final guess ({p1_fin:.4g}, {p2_fin:.4g})',
-                     zorder=12)
+                     zorder=14)
+    if p1_best is not None:
+        ax_c.scatter(p1_best, p2_best,
+                     color='gold', s=70, marker='o',
+                     edgecolor='black', linewidth=0.7, alpha=0.85,
+                     label=f'{len(p1_best)} best samples', zorder=13)
+        # If any best samples fell outside the scan window, widen the contour
+        # axes (with a small margin) so the gold dots are actually visible. The
+        # contour stays drawn over [p1_lo, p1_hi] x [p2_lo, p2_hi]; the area
+        # outside is just empty white background — which is the correct visual
+        # cue that the optimiser strayed beyond the J scan.
+        x_lo = min(p1_lo, float(p1_best.min()))
+        x_hi = max(p1_hi, float(p1_best.max()))
+        y_lo = min(p2_lo, float(p2_best.min()))
+        y_hi = max(p2_hi, float(p2_best.max()))
+        x_pad = 0.02 * (x_hi - x_lo)
+        y_pad = 0.02 * (y_hi - y_lo)
+        ax_c.set_xlim(x_lo - x_pad, x_hi + x_pad)
+        ax_c.set_ylim(y_lo - y_pad, y_hi + y_pad)
     ax_c.set_xlabel(_xlabel[p1_name])
     ax_c.set_ylabel(_xlabel[p2_name])
     ax_c.set_title(f'$\\log_{{10}} J({p1_name}, {p2_name})$  contour')
     ax_c.legend(fontsize=8, loc='best')
     fig.colorbar(cf, ax=ax_c, shrink=0.85, label=r'$\log_{10} J$')
 
+    _res_label = {'slip': r'slip $u$', 'logV': r'$\log V$'}[residual]
     fig.suptitle(
         f'2D objective landscape — discrete adjoint via JAX/Diffrax  '
-        f'($\\sigma$ = {sigma:.2e} s, grid {n1}x{n2})'
+        f'($\\sigma$ = {sigma:.2e} s, grid {n1}x{n2}, residual: {_res_label})'
     )
     plt.tight_layout()
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
         fname = os.path.join(save_dir,
-                              f'J_landscape_2d_{p1_name}_{p2_name}_jax.png')
+                              f'J_landscape_2d_{p1_name}_{p2_name}_{residual}_jax.png')
         plt.savefig(fname, dpi=150, bbox_inches='tight')
     plt.show()
 
@@ -1194,6 +1396,27 @@ def run_J_landscape_2d_jax(M, T,
               f"{p2_name}={p2_fin:.5g})")
         if np.isfinite(J_grid[i1_f, i2_f]):
             print(f"  J at final-guess grid pt = {J_grid[i1_f, i2_f]:.3e}")
+    if p1_best is not None:
+        n_print = min(len(p1_best), 10)
+        # Spread of the N best samples — if these are all O(1e-6) the dots will
+        # visually overlap on a ±15% / ±30% landscape; that's the explanation
+        # for "I asked for 20 but only see a few markers".
+        p1_span = float(p1_best.max() - p1_best.min())
+        p2_span = float(p2_best.max() - p2_best.min())
+        p1_axspan = float(p1_hi - p1_lo)
+        p2_axspan = float(p2_hi - p2_lo)
+        print(f"Best {len(p1_best)} samples (smallest J)"
+              + (f"  — printing top {n_print}:" if n_print < len(p1_best) else ":"))
+        print(f"  {p1_name} spread: {p1_span:.3g}  "
+              f"({p1_span/p1_axspan*100:.2f}% of axis range)")
+        print(f"  {p2_name} spread: {p2_span:.3g}  "
+              f"({p2_span/p2_axspan*100:.2f}% of axis range)")
+        for rk in range(n_print):
+            print(f"  #{rk+1:2d}  {p1_name}={p1_best[rk]:.5g}  "
+                  f"{p2_name}={p2_best[rk]:.5g}  J={J_best[rk]:.3e}")
+    if samples is not None:
+        print(f"Optimiser-sample coverage: {p1_samp.size} evaluations  "
+              f"(heatmap: {'on' if show_exploration_heatmap else 'off'})")
 
     return {
         'p1_name':   p1_name,
@@ -1203,4 +1426,5 @@ def run_J_landscape_2d_jax(M, T,
         'J_grid':    J_grid,
         'logJ_grid': logJ_grid,
         'sigma':     sigma,
+        'residual':  residual,
     }
