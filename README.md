@@ -1,6 +1,6 @@
 # spring-slider-sensitivity
 
-Gradient-based inversion for rate-and-state friction parameters in 1-D and 2-block spring-slider models of afterslip. The active gradient path for the two-block problem is a **discrete adjoint via JAX/Diffrax automatic differentiation**, which backpropagates through the actual adaptive ODE stepper and scales independently of the number of parameters.
+Gradient-based inversion for rate-and-state friction parameters in 1-D and 2-block spring-slider models of afterslip. The active gradient path for the two-block problem is a **discrete adjoint via JAX/Diffrax automatic differentiation**, which backpropagates through the actual adaptive ODE stepper and scales independently of the number of parameters. See [this writeup](https://drive.google.com/file/d/1krXGZ8W7lbk31qDQwMQEpktJaUW_oaRo/view?usp=sharing) for a more thorough discussion of the work in this project.
 
 ## Overview
 
