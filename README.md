@@ -22,12 +22,12 @@ Visible features:
 
 - **Long narrow ridges and valleys** — `J` varies by orders of magnitude across a thin ridge but is nearly flat along it, so descent stalls or zig-zags.
 - **Many shallow local minima** clustered near the true parameters (red star at `(0.001, 40)`). The grid minimum (cyan circle) and the recovered inversion result (magenta X) sit in different basins from the truth despite all three being within a few percent in `a1`.
-- **Small-amplitude high-frequency texture** from the adaptive stepper boundary changing across the parameter grid, even at `Dopri8` with `rtol=1e-11, atol=1e-13`. Loosening tolerances makes this dominate the basin structure.
+- **Small-amplitude high-frequency texture** from the adaptive stepper boundary changing across the parameter grid, even at `Dopri8` with `rtol=1e-11, atol=1e-13`. 
 
 Practical consequences:
 - Local optimisers (`trust-constr`, `L-BFGS-B`) reliably descend into *a* nearby minimum but rarely the global one. Use `basinhopping` or multi-start for any meaningful inversion.
 - The gradient is correct — local-minimum trapping is a property of the objective, not a gradient bug.
-- The smoothing scale `sigma` in `S` is the main lever for regularising the landscape: larger `sigma` washes out high-frequency structure at the cost of resolving fewer features.
+- The smoothing scale `sigma` in `S` is a lever for regularising the landscape: larger `sigma` washes out some high-frequency structure but does not completely solve the problem. Fine-grain structure remains mostly in the $k_{12}$ direction regardless of the amount of smoothing.
 
 ## Physics
 
