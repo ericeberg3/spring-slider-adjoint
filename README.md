@@ -13,7 +13,7 @@ Two gradient paths for `p ∈ {a1, a2, k0, k12}`:
 
 ## Why not the continuous adjoint?
 
-An earlier version used the continuous adjoint. With adaptive time stepping and fast slip events (ruptures), the continuous adjoint becomes dual-inconsistent (Alexe & Sandu 2009): it integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup. Two independent adjoint solvers (explicit RK3 and implicit Radau) agreed with each other but disagreed with FD by many orders of magnitude on long horizons. Both forward sensitivity and the discrete-adjoint-via-AD path sidestep this — they differentiate the actual discretisation rather than a continuous PDE whose discretisation drifts from the forward grid.
+An earlier version used the continuous adjoint. With adaptive time stepping and fast slip events (ruptures), the continuous adjoint becomes inconsistent: it integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup. Two independent adjoint solvers (explicit RK3 and implicit Radau) agreed with each other but disagreed with FD by many orders of magnitude on long horizons. Both forward sensitivity and the discrete-adjoint-via-AD path sidestep this — they differentiate the actual discretisation rather than a continuous PDE whose discretisation drifts from the forward grid.
 
 ## Physics
 
