@@ -10,7 +10,7 @@ The forward model integrates a DAE (force balance + ODEs for slip `u` and state 
 
 ## Why not the continuous adjoint?
 
-An earlier version used the continuous adjoint. With adaptive time stepping and fast slip events (ruptures), the continuous adjoint becomes dual-inconsistent (Alexe & Sandu 2009): it integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup. Two independent adjoint solvers (explicit RK3 and implicit Radau) agreed with each other but disagreed with FD by many orders of magnitude on long horizons.
+An earlier version used the continuous adjoint. With adaptive time stepping and fast slip events (ruptures), the continuous adjoint becomes inconsistent with FD: it integrates against forward-grid-interpolated Jacobians whose denominator `tau_V + eta` pinches near rupture, producing spurious blowup. Two independent adjoint solvers (explicit RK3 and implicit Radau) agreed with each other but disagreed with FD by many orders of magnitude on long horizons.
 
 An intermediate numpy **forward sensitivity** path (`ds_x/dp` integrated alongside the nominal state) also sidestepped the issue but scaled linearly in the number of parameters and has been retired in favour of the discrete-adjoint-via-AD path. The discrete-adjoint differentiates the actual discretisation rather than a continuous PDE whose discretisation drifts from the forward grid.
 
